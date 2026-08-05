@@ -341,24 +341,21 @@ with tab_status:
         c4.metric("총 미수잔액", f"{status_df['미수잔액'].sum():,} 원")
 
         st.divider()
-        st.caption("💡 계약일/착공일/준공일/계약금액/추가계약/공정율(%) 만 직접 수정 가능합니다. 나머지는 관리자 탭 데이터로 자동 계산됩니다. (계약일 기준 정렬)")
+        st.caption("💡 아래 표에서 계약일/착공일/준공일/계약금액/추가계약/공정율(%) 만 직접 수정 가능합니다. (계약일 기준 정렬)")
 
-        display_df = fmt_money_cols(status_df, ["계약금액", "추가계약", "총공사금액", "총청구금액", "계산서발행액", "총입금액", "미수잔액"])
-        display_df["공정율(%)"] = status_df["공정율(%)"].round(0).astype(int)
-        display_df["수금율(%)"] = status_df["수금율(%)"].round(0).astype(int)
+        edit_cols_df = status_df[["id", "현장명", "계약일", "착공일", "준공일", "계약금액", "추가계약", "공정율(%)"]].copy()
+        edit_cols_df["공정율(%)"] = edit_cols_df["공정율(%)"].round(0).astype(int)
+        edit_cols_df = fmt_money_cols(edit_cols_df, ["계약금액", "추가계약"])
 
         edited = st.data_editor(
-            display_df.drop(columns=["id"]),
+            edit_cols_df.drop(columns=["id"]),
             use_container_width=True,
-            disabled=["현장명", "총공사금액", "총청구금액", "계산서발행액", "총입금액", "미수잔액", "수금율(%)"],
+            disabled=["현장명"],
             column_config={
                 "계약일": st.column_config.DateColumn(format="YYYY-MM-DD"),
                 "착공일": st.column_config.DateColumn(format="YYYY-MM-DD"),
                 "준공일": st.column_config.DateColumn(format="YYYY-MM-DD"),
-                "총청구금액": st.column_config.TextColumn(help="지금까지 실제로 청구(기성)한 금액 합계"),
-                "미수잔액": st.column_config.TextColumn(help="총청구금액 - 총입금액 (계약금액 기준이 아닙니다)"),
                 "공정율(%)": st.column_config.NumberColumn(format="%d"),
-                "수금율(%)": st.column_config.NumberColumn(format="%d"),
             },
             key="status_editor"
         )
@@ -366,7 +363,7 @@ with tab_status:
         if st.button("💾 저장", use_container_width=True):
             with engine.connect() as conn:
                 for i, row in edited.iterrows():
-                    site_id = int(status_df.iloc[i]["id"])
+                    site_id = int(edit_cols_df.iloc[i]["id"])
                     cd = safe_date(row["계약일"]); sd = safe_date(row["착공일"]); ed = safe_date(row["준공일"])
                     conn.execute(text("""
                         UPDATE sites SET contract_amount=:ca, additional_amount=:aa, progress_rate=:pr,
@@ -379,6 +376,11 @@ with tab_status:
                 conn.commit()
             st.success("저장되었습니다.")
             st.rerun()
+
+        st.divider()
+        st.markdown("#### 📊 자동 계산 항목 (여기서는 수정 안 됨 — 관리자 탭 데이터 기준)")
+        readonly_cols_df = status_df[["현장명", "총공사금액", "총청구금액", "계산서발행액", "총입금액", "미수잔액", "수금율(%)"]].copy()
+        render_html_table(readonly_cols_df, money_cols=["총공사금액", "총청구금액", "계산서발행액", "총입금액", "미수잔액"])
 
         # AS 합산 현황 (별도 집계, 편집 불가)
         if as_claim_ids:
