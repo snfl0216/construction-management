@@ -146,6 +146,39 @@ def style_money(df, cols):
     return df.style.format(fmt)
 
 
+def render_html_table(df, money_cols=None, left_cols=None):
+    """st.dataframe은 정렬(가운데/오른쪽) 커스텀이 스트림릿 자체에서 지원이 안 돼서,
+    표를 직접 HTML로 그려서 확실하게 정렬을 고정한다. (현장명만 왼쪽, 금액은 오른쪽, 나머진 가운데)"""
+    money_cols = set(money_cols or [])
+    left_cols = set(left_cols if left_cols is not None else ["현장명"])
+    d = df.copy()
+    html = "<div style='overflow-x:auto;'><table style='width:100%;border-collapse:collapse;font-size:13px;'>"
+    html += "<thead><tr>"
+    for col in d.columns:
+        align = "right" if col in money_cols else ("left" if col in left_cols else "center")
+        html += (f"<th style='padding:6px 10px;border-bottom:2px solid #ddd;background:#fafafa;"
+                  f"text-align:{align};white-space:nowrap;'>{col}</th>")
+    html += "</tr></thead><tbody>"
+    for _, row in d.iterrows():
+        html += "<tr>"
+        for col in d.columns:
+            val = row[col]
+            if col in money_cols:
+                try:
+                    val_disp = f"{int(val):,}"
+                except (TypeError, ValueError):
+                    val_disp = "" if pd.isna(val) else str(val)
+                align = "right"
+            else:
+                val_disp = "" if pd.isna(val) else str(val)
+                align = "left" if col in left_cols else "center"
+            html += (f"<td style='padding:5px 10px;border-bottom:1px solid #eee;"
+                      f"text-align:{align};white-space:nowrap;'>{val_disp}</td>")
+        html += "</tr>"
+    html += "</tbody></table></div>"
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def normalize_company(c):
     if not c:
         return c
@@ -419,8 +452,7 @@ with tab_progress:
             if type_filter != "전체":
                 disp = disp[disp["채권종류"] == type_filter]
             csv_data_bysite = disp.to_csv(index=False).encode("utf-8-sig")
-            disp = style_money(disp, ["총청구금액", "총입금액", "미수잔액"])
-            st.dataframe(disp, use_container_width=True)
+            render_html_table(disp, money_cols=["총청구금액", "총입금액", "미수잔액"])
             st.download_button("📥 CSV 다운로드", csv_data_bysite,
                                 file_name=f"현장별_기성현황_{date.today()}.csv", mime="text/csv")
 
@@ -446,7 +478,7 @@ with tab_progress:
                 rows.append(row)
             manager_df = pd.DataFrame(rows)
             csv_data_mgr = manager_df.to_csv(index=False).encode("utf-8-sig")
-            st.dataframe(style_money(manager_df, ["총 채권금액", "총 수금액", "미수잔액"]), use_container_width=True)
+            render_html_table(manager_df, money_cols=["총 채권금액", "총 수금액", "미수잔액"])
             st.download_button("📥 CSV 다운로드", csv_data_mgr,
                                 file_name=f"담당자별_수금현황_{date.today()}.csv", mime="text/csv")
 
@@ -469,7 +501,7 @@ with tab_progress:
                 })
             company_df = pd.DataFrame(rows)
             csv_data_co = company_df.to_csv(index=False).encode("utf-8-sig")
-            st.dataframe(style_money(company_df, ["총계약금", "미수금", "입금액", "계산서발행액"]), use_container_width=True)
+            render_html_table(company_df, money_cols=["총계약금", "미수금", "입금액", "계산서발행액"])
             st.download_button("📥 CSV 다운로드", csv_data_co,
                                 file_name=f"거래업체별_현황_{date.today()}.csv", mime="text/csv")
 
@@ -584,7 +616,7 @@ with tab_calendar:
                         "지연사유": c["delay_reason"] or "-",
                     })
             if day_rows:
-                st.dataframe(style_money(pd.DataFrame(day_rows), ["청구금액"]), use_container_width=True)
+                render_html_table(pd.DataFrame(day_rows), money_cols=["청구금액"])
             else:
                 st.info("해당 날짜에 예정된 청구가 없습니다.")
 
@@ -639,7 +671,7 @@ with tab_risk:
             st.markdown("#### 리스크 청구 상세")
             display_risk = risk_df.drop(columns=["_sev"]).sort_values("지연일수", ascending=False)
             csv_data_risk = display_risk.to_csv(index=False).encode("utf-8-sig")
-            st.dataframe(style_money(display_risk, ["청구금액"]), use_container_width=True)
+            render_html_table(display_risk, money_cols=["청구금액"])
             st.download_button("📥 CSV 다운로드", csv_data_risk,
                                 file_name=f"리스크현장_{date.today()}.csv", mime="text/csv")
 
@@ -1316,7 +1348,7 @@ with tab_admin:
             else:
                 site_pick = st.selectbox("현장 필터", ["전체"] + sorted(hist["site_name"].unique().tolist()))
                 disp = hist if site_pick == "전체" else hist[hist["site_name"] == site_pick]
-                st.dataframe(style_money(disp, ["claim_amount"]), use_container_width=True)
+                render_html_table(disp, money_cols=["claim_amount"], left_cols=["site_name"])
                 st.divider()
                 st.markdown("#### 📊 청구별 누적 지연 횟수")
                 agg = hist[hist["event_type"] == "자동지연"].groupby(["site_name", "claim_type"]).agg(
@@ -1355,7 +1387,7 @@ with tab_admin:
                         FROM tax_invoices i JOIN sites s ON i.site_id = s.id
                         ORDER BY i.issue_date DESC;
                     """, conn)
-                st.dataframe(style_money(inv_list, ["invoice_amount"]), use_container_width=True)
+                render_html_table(inv_list, money_cols=["invoice_amount"], left_cols=["site_name"])
                 del_id = st.number_input("삭제할 계산서 ID", min_value=1, step=1)
                 if st.button("❌ 계산서 삭제"):
                     with engine.connect() as conn:
@@ -1405,7 +1437,7 @@ with tab_admin:
 
                 elif mod_type == "청구 삭제":
                     claims = pd.read_sql("SELECT c.id, s.site_name, c.claim_type, c.claim_amount FROM claims c JOIN sites s ON c.site_id=s.id;", conn)
-                    st.dataframe(style_money(claims, ["claim_amount"]), use_container_width=True)
+                    render_html_table(claims, money_cols=["claim_amount"], left_cols=["site_name"])
                     del_id = st.number_input("삭제할 청구 ID", min_value=1, step=1)
                     if st.button("❌ 청구 삭제"):
                         conn.execute(text("DELETE FROM claims WHERE id=:id;"), {"id": del_id})
@@ -1415,7 +1447,7 @@ with tab_admin:
 
                 elif mod_type == "입금내역 삭제":
                     payments = pd.read_sql("SELECT p.id, s.site_name, p.payment_date, p.payment_amount FROM payments p JOIN sites s ON p.site_id=s.id;", conn)
-                    st.dataframe(style_money(payments, ["payment_amount"]), use_container_width=True)
+                    render_html_table(payments, money_cols=["payment_amount"], left_cols=["site_name"])
                     del_id = st.number_input("삭제할 입금 ID", min_value=1, step=1)
                     if st.button("❌ 입금내역 삭제"):
                         conn.execute(text("DELETE FROM payments WHERE id=:id;"), {"id": del_id})
