@@ -123,6 +123,23 @@ def safe_date(v):
         return None
 
 
+def fmt_money(x):
+    try:
+        if pd.isna(x):
+            return "0"
+    except (TypeError, ValueError):
+        pass
+    return f"{int(x):,}"
+
+
+def fmt_money_cols(df, cols):
+    df = df.copy()
+    for c in cols:
+        if c in df.columns:
+            df[c] = df[c].apply(fmt_money)
+    return df
+
+
 def normalize_company(c):
     if not c:
         return c
@@ -287,21 +304,18 @@ with tab_status:
         st.divider()
         st.caption("💡 계약일/착공일/준공일/계약금액/추가계약/공정율(%) 만 직접 수정 가능합니다. 나머지는 관리자 탭 데이터로 자동 계산됩니다. (계약일 기준 정렬)")
 
+        display_df = fmt_money_cols(status_df, ["계약금액", "추가계약", "총공사금액", "총청구금액", "계산서발행액", "총입금액", "미수잔액"])
+
         edited = st.data_editor(
-            status_df.drop(columns=["id"]),
+            display_df.drop(columns=["id"]),
             use_container_width=True,
             disabled=["현장명", "총공사금액", "총청구금액", "계산서발행액", "총입금액", "미수잔액", "수금율(%)"],
             column_config={
                 "계약일": st.column_config.DateColumn(format="YYYY-MM-DD"),
                 "착공일": st.column_config.DateColumn(format="YYYY-MM-DD"),
                 "준공일": st.column_config.DateColumn(format="YYYY-MM-DD"),
-                "계약금액": st.column_config.NumberColumn(format="%'d"),
-                "추가계약": st.column_config.NumberColumn(format="%'d"),
-                "총공사금액": st.column_config.NumberColumn(format="%'d"),
-                "총청구금액": st.column_config.NumberColumn(format="%'d", help="지금까지 실제로 청구(기성)한 금액 합계"),
-                "계산서발행액": st.column_config.NumberColumn(format="%'d"),
-                "총입금액": st.column_config.NumberColumn(format="%'d"),
-                "미수잔액": st.column_config.NumberColumn(format="%'d", help="총청구금액 - 총입금액 (계약금액 기준이 아닙니다)"),
+                "총청구금액": st.column_config.TextColumn(help="지금까지 실제로 청구(기성)한 금액 합계"),
+                "미수잔액": st.column_config.TextColumn(help="총청구금액 - 총입금액 (계약금액 기준이 아닙니다)"),
             },
             key="status_editor"
         )
@@ -394,12 +408,10 @@ with tab_progress:
                 disp = disp[disp["현장명"] == site_filter]
             if type_filter != "전체":
                 disp = disp[disp["채권종류"] == type_filter]
-            st.dataframe(disp, use_container_width=True, column_config={
-                "총청구금액": st.column_config.NumberColumn(format="%'d"),
-                "총입금액": st.column_config.NumberColumn(format="%'d"),
-                "미수잔액": st.column_config.NumberColumn(format="%'d"),
-            })
-            st.download_button("📥 CSV 다운로드", disp.to_csv(index=False).encode("utf-8-sig"),
+            csv_data_bysite = disp.to_csv(index=False).encode("utf-8-sig")
+            disp = fmt_money_cols(disp, ["총청구금액", "총입금액", "미수잔액"])
+            st.dataframe(disp, use_container_width=True)
+            st.download_button("📥 CSV 다운로드", csv_data_bysite,
                                 file_name=f"현장별_기성현황_{date.today()}.csv", mime="text/csv")
 
         elif view_mode == "담당자별":
@@ -423,12 +435,9 @@ with tab_progress:
                     row[ct] = len(mc[mc["채권종류"] == ct])
                 rows.append(row)
             manager_df = pd.DataFrame(rows)
-            st.dataframe(manager_df, use_container_width=True, column_config={
-                "총 채권금액": st.column_config.NumberColumn(format="%'d"),
-                "총 수금액": st.column_config.NumberColumn(format="%'d"),
-                "미수잔액": st.column_config.NumberColumn(format="%'d"),
-            })
-            st.download_button("📥 CSV 다운로드", manager_df.to_csv(index=False).encode("utf-8-sig"),
+            csv_data_mgr = manager_df.to_csv(index=False).encode("utf-8-sig")
+            st.dataframe(fmt_money_cols(manager_df, ["총 채권금액", "총 수금액", "미수잔액"]), use_container_width=True)
+            st.download_button("📥 CSV 다운로드", csv_data_mgr,
                                 file_name=f"담당자별_수금현황_{date.today()}.csv", mime="text/csv")
 
         else:  # 거래업체별
@@ -449,13 +458,9 @@ with tab_progress:
                     "입금액": total_paid, "계산서발행액": inv_sum
                 })
             company_df = pd.DataFrame(rows)
-            st.dataframe(company_df, use_container_width=True, column_config={
-                "총계약금": st.column_config.NumberColumn(format="%'d"),
-                "미수금": st.column_config.NumberColumn(format="%'d"),
-                "입금액": st.column_config.NumberColumn(format="%'d"),
-                "계산서발행액": st.column_config.NumberColumn(format="%'d"),
-            })
-            st.download_button("📥 CSV 다운로드", company_df.to_csv(index=False).encode("utf-8-sig"),
+            csv_data_co = company_df.to_csv(index=False).encode("utf-8-sig")
+            st.dataframe(fmt_money_cols(company_df, ["총계약금", "미수금", "입금액", "계산서발행액"]), use_container_width=True)
+            st.download_button("📥 CSV 다운로드", csv_data_co,
                                 file_name=f"거래업체별_현황_{date.today()}.csv", mime="text/csv")
 
 # ==========================================================================
@@ -493,19 +498,24 @@ with tab_calendar:
                 st.session_state.cal_year += 1
             st.rerun()
 
-        st.caption("🔴 지연  🟢 입금완료  (날짜를 누르면 그날 목록이 아래 뜹니다)")
+        st.caption("🔴 지연  🟢 입금완료  (날짜를 누르면 그날 전체 목록이 아래 뜹니다)")
 
         yr, mo = st.session_state.cal_year, st.session_state.cal_month
 
-        day_flags = {}
+        day_entries = {}
         for _, c in merged.iterrows():
             d = safe_date(c["current_due_date"])
             if d and d.year == yr and d.month == mo:
                 st_disp = display_status(c["status"], c["current_due_date"], today)
                 if c["status"] == "완납":
-                    day_flags.setdefault(d.day, set()).add("🟢")
+                    color = "#2ecc71"
                 elif "지연" in st_disp:
-                    day_flags.setdefault(d.day, set()).add("🔴")
+                    color = "#e74c3c"
+                else:
+                    color = "#888888"
+                site_short = c["site_name"][:8] + ("…" if len(c["site_name"]) > 8 else "")
+                label = f"{site_short} {c['claim_type']}"
+                day_entries.setdefault(d.day, []).append({"label": label, "color": color})
 
         cal = pycal.Calendar(firstweekday=6)  # 일요일 시작
         weeks = cal.monthdayscalendar(yr, mo)
@@ -515,16 +525,25 @@ with tab_calendar:
         for i, lab in enumerate(weekday_labels):
             header_cols[i].markdown(f"<div style='text-align:center;font-weight:bold'>{lab}</div>", unsafe_allow_html=True)
 
+        MAX_SHOWN = 3
         for week in weeks:
             row_cols = st.columns(7)
             for i, daynum in enumerate(week):
                 if daynum == 0:
                     row_cols[i].write("")
                     continue
-                flags = day_flags.get(daynum, set())
-                label = f"{daynum}\n{''.join(sorted(flags))}" if flags else f"{daynum}"
-                if row_cols[i].button(label, key=f"cal_{yr}_{mo}_{daynum}", use_container_width=True):
-                    st.session_state["cal_selected_date"] = date(yr, mo, daynum).isoformat()
+                with row_cols[i]:
+                    if st.button(str(daynum), key=f"cal_{yr}_{mo}_{daynum}", use_container_width=True):
+                        st.session_state["cal_selected_date"] = date(yr, mo, daynum).isoformat()
+                    entries = day_entries.get(daynum, [])
+                    if entries:
+                        html = ""
+                        for e in entries[:MAX_SHOWN]:
+                            html += (f"<div style='font-size:11px;color:{e['color']};white-space:nowrap;"
+                                     f"overflow:hidden;text-overflow:ellipsis' title='{e['label']}'>● {e['label']}</div>")
+                        if len(entries) > MAX_SHOWN:
+                            html += f"<div style='font-size:10px;color:#888'>+{len(entries) - MAX_SHOWN}건 더</div>"
+                        st.markdown(html, unsafe_allow_html=True)
 
         sel_date = st.session_state.get("cal_selected_date")
         if sel_date:
@@ -540,9 +559,7 @@ with tab_calendar:
                         "지연사유": c["delay_reason"] or "-",
                     })
             if day_rows:
-                st.dataframe(pd.DataFrame(day_rows), use_container_width=True, column_config={
-                    "청구금액": st.column_config.NumberColumn(format="%'d"),
-                })
+                st.dataframe(fmt_money_cols(pd.DataFrame(day_rows), ["청구금액"]), use_container_width=True)
             else:
                 st.info("해당 날짜에 예정된 청구가 없습니다.")
 
@@ -596,10 +613,9 @@ with tab_risk:
             st.divider()
             st.markdown("#### 리스크 청구 상세")
             display_risk = risk_df.drop(columns=["_sev"]).sort_values("지연일수", ascending=False)
-            st.dataframe(display_risk, use_container_width=True, column_config={
-                "청구금액": st.column_config.NumberColumn(format="%'d"),
-            })
-            st.download_button("📥 CSV 다운로드", display_risk.to_csv(index=False).encode("utf-8-sig"),
+            csv_data_risk = display_risk.to_csv(index=False).encode("utf-8-sig")
+            st.dataframe(fmt_money_cols(display_risk, ["청구금액"]), use_container_width=True)
+            st.download_button("📥 CSV 다운로드", csv_data_risk,
                                 file_name=f"리스크현장_{date.today()}.csv", mime="text/csv")
 
 # ==========================================================================
@@ -1062,9 +1078,7 @@ with tab_admin:
             else:
                 site_pick = st.selectbox("현장 필터", ["전체"] + sorted(hist["site_name"].unique().tolist()))
                 disp = hist if site_pick == "전체" else hist[hist["site_name"] == site_pick]
-                st.dataframe(disp, use_container_width=True, column_config={
-                    "claim_amount": st.column_config.NumberColumn("claim_amount", format="%'d"),
-                })
+                st.dataframe(fmt_money_cols(disp, ["claim_amount"]), use_container_width=True)
                 st.divider()
                 st.markdown("#### 📊 청구별 누적 지연 횟수")
                 agg = hist[hist["event_type"] == "자동지연"].groupby(["site_name", "claim_type"]).agg(
@@ -1103,9 +1117,7 @@ with tab_admin:
                         FROM tax_invoices i JOIN sites s ON i.site_id = s.id
                         ORDER BY i.issue_date DESC;
                     """, conn)
-                st.dataframe(inv_list, use_container_width=True, column_config={
-                    "invoice_amount": st.column_config.NumberColumn(format="%'d"),
-                })
+                st.dataframe(fmt_money_cols(inv_list, ["invoice_amount"]), use_container_width=True)
                 del_id = st.number_input("삭제할 계산서 ID", min_value=1, step=1)
                 if st.button("❌ 계산서 삭제"):
                     with engine.connect() as conn:
@@ -1155,9 +1167,7 @@ with tab_admin:
 
                 elif mod_type == "청구 삭제":
                     claims = pd.read_sql("SELECT c.id, s.site_name, c.claim_type, c.claim_amount FROM claims c JOIN sites s ON c.site_id=s.id;", conn)
-                    st.dataframe(claims, use_container_width=True, column_config={
-                        "claim_amount": st.column_config.NumberColumn(format="%'d"),
-                    })
+                    st.dataframe(fmt_money_cols(claims, ["claim_amount"]), use_container_width=True)
                     del_id = st.number_input("삭제할 청구 ID", min_value=1, step=1)
                     if st.button("❌ 청구 삭제"):
                         conn.execute(text("DELETE FROM claims WHERE id=:id;"), {"id": del_id})
@@ -1167,9 +1177,7 @@ with tab_admin:
 
                 elif mod_type == "입금내역 삭제":
                     payments = pd.read_sql("SELECT p.id, s.site_name, p.payment_date, p.payment_amount FROM payments p JOIN sites s ON p.site_id=s.id;", conn)
-                    st.dataframe(payments, use_container_width=True, column_config={
-                        "payment_amount": st.column_config.NumberColumn(format="%'d"),
-                    })
+                    st.dataframe(fmt_money_cols(payments, ["payment_amount"]), use_container_width=True)
                     del_id = st.number_input("삭제할 입금 ID", min_value=1, step=1)
                     if st.button("❌ 입금내역 삭제"):
                         conn.execute(text("DELETE FROM payments WHERE id=:id;"), {"id": del_id})
