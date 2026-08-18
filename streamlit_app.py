@@ -1,8 +1,9 @@
 import streamlit as st
 from sqlalchemy import create_engine, text
 import pandas as pd
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 import io
+import calendar as pycal
 
 st.set_page_config(page_title="건설 현장 정산 & 지연 관리 시스템", layout="wide")
 st.title("🏗️ 건설 현장 정산 & 지연 관리 시스템")
@@ -11,42 +12,35 @@ st.title("🏗️ 건설 현장 정산 & 지연 관리 시스템")
 ADMIN_PASSWORD = "chdan1576**"
 
 CLAIM_TYPES = ["선급금", "기성금", "중도금", "잔금", "추가금", "정산금", "AS", "시공부자재"]
-STATUS_OPTIONS = ["입금대기", "일부입금", "완납", "확인필요"]
+CLOSED_STATUS_WORDS = ("완불", "계약파기", "완료", "감액종결")
 
-engine = create_engine("sqlite:///construction_v5.db")
+engine = create_engine("sqlite:///construction_v6.db")
 
 # --------------------------------------------------------------------------
-# DB 초기화
+# DB 초기화 — 두 데이터 파이프라인 완전히 분리
 # --------------------------------------------------------------------------
 with engine.connect() as conn:
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS sites (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            site_name TEXT NOT NULL UNIQUE,
-            company_name TEXT,
-            manager TEXT,
-            contract_amount INTEGER DEFAULT 0,
-            additional_amount INTEGER DEFAULT 0,
-            progress_rate REAL DEFAULT 0,
-            contract_date TEXT,
-            start_date TEXT,
-            completion_date TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """))
+    # ===== 일일수금관리(이력) 기준 : 기성청구현황 / 캘린더 / 리스크현장 =====
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS claims (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            site_id INTEGER,
+            site_name TEXT,
+            manager TEXT,
             claim_type TEXT DEFAULT '기성금',
             claim_date TEXT,
             original_due_date TEXT,
             current_due_date TEXT,
             claim_amount INTEGER DEFAULT 0,
             status TEXT DEFAULT '입금대기',
-            delay_reason TEXT,
-            last_flagged_due_date TEXT,
-            FOREIGN KEY(site_id) REFERENCES sites(id) ON DELETE CASCADE
+            last_flagged_due_date TEXT
+        );
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            claim_id INTEGER,
+            payment_date TEXT,
+            payment_amount INTEGER DEFAULT 0
         );
     """))
     conn.execute(text("""
@@ -59,28 +53,41 @@ with engine.connect() as conn:
             new_due_date TEXT,
             payment_date TEXT,
             delay_days INTEGER DEFAULT 0,
-            reason TEXT,
-            FOREIGN KEY(claim_id) REFERENCES claims(id) ON DELETE CASCADE
+            reason TEXT
+        );
+    """))
+    # ===== 현장별 미수관리(미수내역) 기준 : 현장별 미수현황 / 완불현장 / 계약현황 =====
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS site_receivables (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_name TEXT,
+            company_name TEXT,
+            manager TEXT,
+            branch TEXT,
+            contract_code TEXT,
+            contract_date TEXT,
+            start_date TEXT,
+            completion_date TEXT,
+            contract_yearmonth TEXT,
+            contract_amount INTEGER DEFAULT 0,
+            change_amount INTEGER DEFAULT 0,
+            total_paid INTEGER DEFAULT 0,
+            unpaid_balance INTEGER DEFAULT 0,
+            progress_rate REAL DEFAULT 0,
+            invoice_progress_rate REAL DEFAULT 0,
+            invoice_issue_rate REAL DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
+            status_label TEXT
         );
     """))
     conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS payments (
+        CREATE TABLE IF NOT EXISTS site_receivable_details (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            site_id INTEGER,
-            claim_id INTEGER,
-            payment_date TEXT,
-            payment_amount INTEGER DEFAULT 0,
-            FOREIGN KEY(site_id) REFERENCES sites(id) ON DELETE CASCADE
-        );
-    """))
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS tax_invoices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            site_id INTEGER,
-            claim_type TEXT,
-            issue_date TEXT,
-            invoice_amount INTEGER DEFAULT 0,
-            FOREIGN KEY(site_id) REFERENCES sites(id) ON DELETE CASCADE
+            site_receivable_id INTEGER,
+            detail_type TEXT,
+            detail_date TEXT,
+            amount INTEGER DEFAULT 0,
+            note TEXT
         );
     """))
     conn.commit()
@@ -90,12 +97,14 @@ with engine.connect() as conn:
 # 공용 함수
 # --------------------------------------------------------------------------
 def parse_amount(v):
-    if pd.isna(v):
+    if v is None:
         return 0
     if isinstance(v, (int, float)):
+        if pd.isna(v):
+            return 0
         return int(v)
     s = str(v).strip().replace(",", "").replace("원", "").replace(" ", "")
-    if s in ("", "-"):
+    if s in ("", "-", "nan"):
         return 0
     try:
         return int(float(s))
@@ -129,7 +138,10 @@ def fmt_money(x):
             return "0"
     except (TypeError, ValueError):
         pass
-    return f"{int(x):,}"
+    try:
+        return f"{int(x):,}"
+    except (TypeError, ValueError):
+        return str(x)
 
 
 def fmt_money_cols(df, cols):
@@ -140,15 +152,8 @@ def fmt_money_cols(df, cols):
     return df
 
 
-def style_money(df, cols):
-    """읽기전용 표에서 숫자 오른쪽 정렬 + 천단위 콤마를 동시에 적용 (에디터에는 못 씀)"""
-    fmt = {c: "{:,.0f}" for c in cols if c in df.columns}
-    return df.style.format(fmt)
-
-
 def render_html_table(df, money_cols=None, left_cols=None):
-    """st.dataframe은 정렬(가운데/오른쪽) 커스텀이 스트림릿 자체에서 지원이 안 돼서,
-    표를 직접 HTML로 그려서 확실하게 정렬을 고정한다. (현장명만 왼쪽, 금액은 오른쪽, 나머진 가운데)"""
+    """현장명만 왼쪽, 금액은 오른쪽(콤마), 나머진 가운데 정렬로 확실하게 고정해서 그린다."""
     money_cols = set(money_cols or [])
     left_cols = set(left_cols if left_cols is not None else ["현장명"])
     d = df.copy()
@@ -177,12 +182,6 @@ def render_html_table(df, money_cols=None, left_cols=None):
         html += "</tr>"
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
-
-
-def normalize_company(c):
-    if not c:
-        return c
-    return str(c).replace("㈜", "").replace("(주)", "").strip()
 
 
 def is_overdue(current_due_date, status, today):
@@ -225,42 +224,25 @@ def claim_severity(delay_count, delay_days):
 SEVERITY_LABEL = {0: "정상", 1: "🟡 주의", 2: "🟠 경고", 3: "🔴 심각"}
 
 
-def load_all():
-    with engine.connect() as conn:
-        sites_df = pd.read_sql("SELECT * FROM sites;", conn)
-        claims_df = pd.read_sql("SELECT * FROM claims;", conn)
-        payments_df = pd.read_sql("SELECT * FROM payments;", conn)
-        invoices_df = pd.read_sql("SELECT * FROM tax_invoices;", conn)
-        history_df = pd.read_sql("SELECT * FROM claim_delay_history;", conn)
-    return sites_df, claims_df, payments_df, invoices_df, history_df
-
-
 def run_daily_delay_check():
-    """예정일이 지났는데 아직 완납이 안 된 청구를 자동으로 '지연' 이력에 한 번만 쌓는다."""
     today_str = date.today().isoformat()
     with engine.connect() as conn:
         open_claims = conn.execute(text("""
             SELECT id, current_due_date, original_due_date, last_flagged_due_date, status
-            FROM claims
-            WHERE status IN ('입금대기', '일부입금')
+            FROM claims WHERE status IN ('입금대기', '일부입금')
         """)).fetchall()
-
         for cid, cur_due, orig_due, last_flag, status in open_claims:
             due_d = safe_date(cur_due)
-            if due_d is None:
-                continue
-            if due_d >= date.today():
+            if due_d is None or due_d >= date.today():
                 continue
             if last_flag == cur_due:
-                continue  # 이 예정일에 대해선 이미 지연 카운팅 했음
-
+                continue
             delay_days = calc_delay_days(orig_due, date.today())
             conn.execute(text("""
                 INSERT INTO claim_delay_history (claim_id, event_type, old_due_date, new_due_date, delay_days, reason)
                 VALUES (:cid, '자동지연', :due, :due, :ddays, '예정일 경과 자동 감지')
             """), {"cid": cid, "due": cur_due, "ddays": delay_days})
-            conn.execute(text("UPDATE claims SET last_flagged_due_date=:due WHERE id=:cid"),
-                         {"due": cur_due, "cid": cid})
+            conn.execute(text("UPDATE claims SET last_flagged_due_date=:due WHERE id=:cid"), {"due": cur_due, "cid": cid})
         conn.commit()
 
 
@@ -275,250 +257,189 @@ if pw_input:
     else:
         st.sidebar.error("비밀번호 틀림")
 
-tab_status, tab_progress, tab_calendar, tab_risk, tab_admin = st.tabs([
-    "🏢 공사현황",
-    "📊 기성현황",
-    "📅 입금 캘린더",
-    "🚨 리스크 현장",
-    "🔐 관리자"
+tab_receivable, tab_progress, tab_calendar, tab_risk, tab_contract, tab_admin = st.tabs([
+    "📋 현장별 미수현황", "📊 기성청구현황", "📅 입금 캘린더", "🚨 리스크 현장", "📈 계약현황", "🔐 관리자"
 ])
 
 # ==========================================================================
-# TAB: 공사현황
+# TAB: 현장별 미수현황  (미수내역 엑셀 미러링)
 # ==========================================================================
-with tab_status:
-    st.subheader("🏢 공사현황")
-    sites_df, claims_df, payments_df, invoices_df, history_df = load_all()
+with tab_receivable:
+    st.subheader("📋 현장별 미수현황")
+    with engine.connect() as conn:
+        sr_df = pd.read_sql("SELECT * FROM site_receivables ORDER BY contract_date;", conn)
 
-    if sites_df.empty:
-        st.info("등록된 현장이 없습니다. '🔐 관리자' 탭에서 엑셀을 업로드해 현장을 먼저 만들어주세요.")
+    if sr_df.empty:
+        st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '현장별 미수관리' 엑셀을 업로드해주세요.")
     else:
-        as_claim_ids = set(claims_df[claims_df["claim_type"] == "AS"]["id"].tolist()) if not claims_df.empty else set()
-
-        rows = []
-        for _, s in sites_df.iterrows():
-            sid = s["id"]
-            total_amount = (s["contract_amount"] or 0) + (s["additional_amount"] or 0)
-
-            claim_sum = 0
-            if not claims_df.empty:
-                claim_sum = claims_df[(claims_df["site_id"] == sid) & (claims_df["claim_type"] != "AS")]["claim_amount"].sum()
-
-            inv_sum = 0
-            if not invoices_df.empty:
-                inv_sum = invoices_df[(invoices_df["site_id"] == sid) & (invoices_df["claim_type"] != "AS")]["invoice_amount"].sum()
-
-            pay_sum = 0
-            if not payments_df.empty:
-                site_pay = payments_df[payments_df["site_id"] == sid]
-                if as_claim_ids:
-                    site_pay = site_pay[~site_pay["claim_id"].isin(as_claim_ids)]
-                pay_sum = site_pay["payment_amount"].sum()
-
-            # 미수잔액/수금율은 계약금액이 아니라 "실제 청구된 금액" 기준 (계약금액 미입력이어도 음수로 안 나옴)
-            unpaid = claim_sum - pay_sum
-            collect_rate = (pay_sum / claim_sum * 100) if claim_sum > 0 else 0
-
-            rows.append({
-                "id": sid, "현장명": s["site_name"],
-                "계약일": s["contract_date"] or "", "착공일": s["start_date"] or "", "준공일": s["completion_date"] or "",
-                "계약금액": s["contract_amount"] or 0, "추가계약": s["additional_amount"] or 0,
-                "총공사금액": total_amount, "총청구금액": claim_sum,
-                "계산서발행액": inv_sum, "총입금액": pay_sum, "미수잔액": unpaid,
-                "공정율(%)": s["progress_rate"] or 0, "수금율(%)": round(collect_rate, 1),
-            })
-
-        status_df = pd.DataFrame(rows)
-        status_df["_sort"] = pd.to_datetime(status_df["계약일"], errors="coerce")
-        status_df = status_df.sort_values("_sort", na_position="last").drop(columns=["_sort"]).reset_index(drop=True)
-        for dcol in ["계약일", "착공일", "준공일"]:
-            status_df[dcol] = pd.to_datetime(status_df[dcol], errors="coerce")
+        active_df = sr_df[sr_df["is_active"] == 1].copy()
+        closed_df = sr_df[sr_df["is_active"] == 0].copy()
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("현장 수", f"{len(status_df)}개")
-        c2.metric("총 공사금액", f"{status_df['총공사금액'].sum():,} 원")
-        c3.metric("총 입금액", f"{status_df['총입금액'].sum():,} 원")
-        c4.metric("총 미수잔액", f"{status_df['미수잔액'].sum():,} 원")
+        c1.metric("활성 현장 수", f"{len(active_df)}개")
+        c2.metric("총 계약금액", f"{(active_df['contract_amount']+active_df['change_amount']).sum():,} 원")
+        c3.metric("총 입금액", f"{active_df['total_paid'].sum():,} 원")
+        c4.metric("총 미수잔액", f"{active_df['unpaid_balance'].sum():,} 원")
 
         st.divider()
-        st.caption("💡 계약일/착공일/준공일/계약금액/추가계약/공정율(%) 만 직접 수정 가능합니다. 나머지는 관리자 탭 데이터로 자동 계산됩니다. (계약일 기준 정렬)")
+        disp = active_df.rename(columns={
+            "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
+            "start_date": "착공일", "completion_date": "준공일", "contract_amount": "총계약금액",
+            "change_amount": "변경계약금액", "total_paid": "총입금액", "unpaid_balance": "미수잔액",
+            "manager": "담당자",
+        })
+        disp["공정율(%)"] = (active_df["progress_rate"] * 100).round(0).astype(int)
+        disp["기성율(%)"] = (active_df["invoice_progress_rate"] * 100).round(0).astype(int)
+        disp["계산서발행율(%)"] = (active_df["invoice_issue_rate"] * 100).round(0).astype(int)
+        show_cols = ["현장명", "업체명", "계약일", "착공일", "준공일", "총계약금액", "변경계약금액",
+                     "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "계산서발행율(%)", "담당자"]
+        render_html_table(disp[show_cols], money_cols=["총계약금액", "변경계약금액", "총입금액", "미수잔액"])
 
-        display_df = fmt_money_cols(status_df, ["계약금액", "추가계약", "총공사금액", "총청구금액", "계산서발행액", "총입금액", "미수잔액"])
-        display_df["공정율(%)"] = status_df["공정율(%)"].round(0).astype(int)
-        display_df["수금율(%)"] = status_df["수금율(%)"].round(0).astype(int)
+        st.divider()
+        st.markdown("#### 🔍 현장 상세 (계산서·입금·변경계약 내역)")
+        pick = st.selectbox("현장 선택", active_df["site_name"].tolist())
+        pick_id = int(active_df[active_df["site_name"] == pick]["id"].values[0])
+        with engine.connect() as conn:
+            detail_df = pd.read_sql(
+                "SELECT detail_type, detail_date, amount, note FROM site_receivable_details WHERE site_receivable_id=:sid ORDER BY detail_date;",
+                conn, params={"sid": pick_id}
+            )
+        if detail_df.empty:
+            st.caption("세부내역이 없습니다.")
+        else:
+            for label in ["변경계약", "계산서", "입금"]:
+                sub = detail_df[detail_df["detail_type"] == label]
+                if sub.empty:
+                    continue
+                st.markdown(f"**{label} 내역**")
+                sub_disp = sub.rename(columns={"detail_date": "일자", "amount": "금액", "note": "비고"}).drop(columns=["detail_type"])
+                render_html_table(sub_disp, money_cols=["금액"], left_cols=[])
 
-        edited = st.data_editor(
-            display_df.drop(columns=["id"]),
-            use_container_width=True,
-            disabled=["현장명", "총공사금액", "총청구금액", "계산서발행액", "총입금액", "미수잔액", "수금율(%)"],
-            column_config={
-                "계약일": st.column_config.DateColumn(format="YYYY-MM-DD"),
-                "착공일": st.column_config.DateColumn(format="YYYY-MM-DD"),
-                "준공일": st.column_config.DateColumn(format="YYYY-MM-DD"),
-                "공정율(%)": st.column_config.NumberColumn(format="%d"),
-                "수금율(%)": st.column_config.NumberColumn(format="%d"),
-            },
-            key="status_editor"
-        )
-
-        if st.button("💾 저장", use_container_width=True):
-            with engine.connect() as conn:
-                for i, row in edited.iterrows():
-                    site_id = int(status_df.iloc[i]["id"])
-                    cd = safe_date(row["계약일"]); sd = safe_date(row["착공일"]); ed = safe_date(row["준공일"])
-                    conn.execute(text("""
-                        UPDATE sites SET contract_amount=:ca, additional_amount=:aa, progress_rate=:pr,
-                               contract_date=:cd, start_date=:sd, completion_date=:ed
-                        WHERE id=:sid
-                    """), {"ca": parse_amount(row["계약금액"]), "aa": parse_amount(row["추가계약"]),
-                           "pr": float(row["공정율(%)"]), "sid": site_id,
-                           "cd": cd.isoformat() if cd else None, "sd": sd.isoformat() if sd else None,
-                           "ed": ed.isoformat() if ed else None})
-                conn.commit()
-            st.success("저장되었습니다.")
-            st.rerun()
-
-        # AS 합산 현황 (별도 집계, 편집 불가)
-        if as_claim_ids:
-            as_claims = claims_df[claims_df["claim_type"] == "AS"]
-            as_claim_sum = as_claims["claim_amount"].sum()
-            as_inv_sum = invoices_df[invoices_df["claim_type"] == "AS"]["invoice_amount"].sum() if not invoices_df.empty else 0
-            as_pay_sum = payments_df[payments_df["claim_id"].isin(as_claim_ids)]["payment_amount"].sum() if not payments_df.empty else 0
-            as_unpaid = as_claim_sum - as_pay_sum
-            st.divider()
-            st.markdown("#### 🧾 AS 합산 현황")
-            a1, a2, a3, a4 = st.columns(4)
-            a1.metric("AS 총 청구금액", f"{as_claim_sum:,} 원")
-            a2.metric("AS 계산서발행액", f"{as_inv_sum:,} 원")
-            a3.metric("AS 총입금액", f"{as_pay_sum:,} 원")
-            a4.metric("AS 미수잔액", f"{as_unpaid:,} 원")
-
-        csv_data = status_df.drop(columns=["id"]).to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 공사현황 CSV 다운로드", data=csv_data, file_name=f"공사현황_{date.today()}.csv", mime="text/csv")
+        st.divider()
+        st.markdown(f"#### ✅ 완불현장 리스트 ({len(closed_df)}개)")
+        if closed_df.empty:
+            st.caption("완불현장이 없습니다.")
+        else:
+            closed_disp = closed_df.rename(columns={
+                "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
+                "contract_amount": "총계약금액", "manager": "담당자", "status_label": "상태",
+            })
+            render_html_table(closed_disp[["현장명", "업체명", "계약일", "총계약금액", "담당자", "상태"]],
+                               money_cols=["총계약금액"])
 
 # ==========================================================================
-# TAB: 기성현황 (현장별 / 담당자별 / 거래업체별)
+# TAB: 기성청구현황  (일일수금관리=이력 엑셀 기준)
 # ==========================================================================
 with tab_progress:
-    st.subheader("📊 기성현황")
-    sites_df, claims_df, payments_df, invoices_df, history_df = load_all()
-    view_mode = st.radio("보기 기준", ["현장별", "담당자별", "거래업체별"], horizontal=True)
+    st.subheader("📊 기성청구현황")
+    view_mode = st.radio("보기 기준", ["현장별", "담당자별"], horizontal=True)
     st.divider()
 
+    with engine.connect() as conn:
+        claims_df = pd.read_sql("SELECT * FROM claims;", conn)
+        payments_df = pd.read_sql("SELECT * FROM payments;", conn)
+        history_df = pd.read_sql("SELECT * FROM claim_delay_history;", conn)
+
     if claims_df.empty:
-        st.info("등록된 청구 내역이 없습니다.")
+        st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '일일수금관리' 엑셀을 업로드해주세요.")
     else:
         today = date.today()
-        merged = claims_df.merge(sites_df[["id", "site_name", "manager", "company_name"]],
-                                  left_on="site_id", right_on="id", suffixes=("", "_site"))
-
-        # ---- claim 단위 상세 계산 (공통으로 재사용) ----
         claim_rows = []
-        for _, c in merged.iterrows():
+        for _, c in claims_df.iterrows():
             cid = c["id"]
             paid = payments_df[payments_df["claim_id"] == cid]["payment_amount"].sum() if not payments_df.empty else 0
             unpaid = (c["claim_amount"] or 0) - paid
-            collect_rate = (paid / c["claim_amount"] * 100) if c["claim_amount"] else 0
-
             hist = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
             delay_count = len(hist)
-
             if c["status"] == "완납":
                 pay_rows = payments_df[payments_df["claim_id"] == cid] if not payments_df.empty else pd.DataFrame()
-                ref_date = safe_date(pay_rows.iloc[-1]["payment_date"]) if not pay_rows.empty else today
-                ref_date = ref_date or today
+                ref_date = (safe_date(pay_rows.iloc[-1]["payment_date"]) if not pay_rows.empty else today) or today
             else:
                 ref_date = today
             delay_days = calc_delay_days(c["original_due_date"], ref_date) if c["status"] != "확인필요" else 0
-
             claim_rows.append({
-                "현장명": c["site_name"], "담당자": c["manager"], "거래업체명": c["company_name"],
-                "채권종류": c["claim_type"], "입금예정일": c["current_due_date"],
-                "총청구금액": c["claim_amount"], "총입금액": paid, "미수잔액": unpaid,
-                "수금율(%)": round(collect_rate, 1), "지연횟수": delay_count, "총지연일수": delay_days,
+                "id": cid, "현장명": c["site_name"], "담당자": c["manager"], "채권종류": c["claim_type"],
+                "청구금액": c["claim_amount"], "입금액": paid, "미수잔액": unpaid,
+                "지연횟수": delay_count, "총지연일수": delay_days,
                 "상태": display_status(c["status"], c["current_due_date"], today),
+                "완납여부": c["status"] == "완납", "지연이력있음": delay_count >= 1,
             })
         claim_df_all = pd.DataFrame(claim_rows)
 
         if view_mode == "현장별":
+            disp = claim_df_all[claim_df_all["미수잔액"] > 0].copy()
             f1, f2 = st.columns(2)
-            site_filter = f1.selectbox("현장 필터", ["전체"] + sorted(claim_df_all["현장명"].unique().tolist()))
+            site_filter = f1.selectbox("현장 필터", ["전체"] + sorted(disp["현장명"].unique().tolist()))
             type_filter = f2.selectbox("채권종류 필터", ["전체"] + CLAIM_TYPES)
-            disp = claim_df_all.drop(columns=["거래업체명"]).copy()
             if site_filter != "전체":
                 disp = disp[disp["현장명"] == site_filter]
             if type_filter != "전체":
                 disp = disp[disp["채권종류"] == type_filter]
-            csv_data_bysite = disp.to_csv(index=False).encode("utf-8-sig")
-            render_html_table(disp, money_cols=["총청구금액", "총입금액", "미수잔액"])
-            st.download_button("📥 CSV 다운로드", csv_data_bysite,
-                                file_name=f"현장별_기성현황_{date.today()}.csv", mime="text/csv")
+            show = disp[["현장명", "담당자", "채권종류", "청구금액", "입금액", "미수잔액", "지연횟수", "총지연일수", "상태"]]
+            render_html_table(show, money_cols=["청구금액", "입금액", "미수잔액"])
+            st.download_button("📥 CSV 다운로드", show.to_csv(index=False).encode("utf-8-sig"),
+                                file_name=f"기성청구현황_현장별_{date.today()}.csv", mime="text/csv")
 
-        elif view_mode == "담당자별":
+        else:  # 담당자별
             managers = sorted(claim_df_all["담당자"].dropna().unique().tolist())
             rows = []
             for m in managers:
                 mc = claim_df_all[claim_df_all["담당자"] == m]
-                total_claim = mc["총청구금액"].sum()
-                total_paid = mc["총입금액"].sum()
-                unpaid = total_claim - total_paid
-                completed = len(mc[mc["상태"] == "완납"])
                 total_cnt = len(mc)
-                row = {
-                    "담당자": m, "총 채권수": total_cnt, "총 채권금액": total_claim, "총 수금액": total_paid,
-                    "미수잔액": unpaid,
-                    "완납률(%)": round(completed / total_cnt * 100, 1) if total_cnt else 0,
-                    "수금률(%)": round(total_paid / total_claim * 100, 1) if total_claim else 0,
-                    "미수율(%)": round(unpaid / total_claim * 100, 1) if total_claim else 0,
-                }
-                for ct in CLAIM_TYPES:
-                    row[ct] = len(mc[mc["채권종류"] == ct])
-                rows.append(row)
-            manager_df = pd.DataFrame(rows)
-            csv_data_mgr = manager_df.to_csv(index=False).encode("utf-8-sig")
-            render_html_table(manager_df, money_cols=["총 채권금액", "총 수금액", "미수잔액"])
-            st.download_button("📥 CSV 다운로드", csv_data_mgr,
-                                file_name=f"담당자별_수금현황_{date.today()}.csv", mime="text/csv")
-
-        else:  # 거래업체별
-            claim_df_all["_norm_company"] = claim_df_all["거래업체명"].apply(normalize_company)
-            companies = sorted([c for c in claim_df_all["_norm_company"].dropna().unique().tolist() if c])
-            rows = []
-            for co in companies:
-                cc = claim_df_all[claim_df_all["_norm_company"] == co]
-                total_claim = cc["총청구금액"].sum()
-                total_paid = cc["총입금액"].sum()
-                unpaid = total_claim - total_paid
-                inv_sum = 0
-                site_names_for_co = sites_df[sites_df["company_name"].apply(normalize_company) == co]["id"].tolist()
-                if not invoices_df.empty and site_names_for_co:
-                    inv_sum = invoices_df[invoices_df["site_id"].isin(site_names_for_co)]["invoice_amount"].sum()
+                completed_cnt = int(mc["완납여부"].sum())
+                unpaid_cnt = total_cnt - completed_cnt
+                ever_delayed_cnt = int(mc["지연이력있음"].sum())
+                total_claim = mc["청구금액"].sum()
+                total_paid = mc["입금액"].sum()
+                unpaid_amt = mc["미수잔액"].sum()
                 rows.append({
-                    "거래업체명": co, "총계약금": total_claim, "미수금": unpaid,
-                    "입금액": total_paid, "계산서발행액": inv_sum
+                    "담당자": m, "총청구금액": total_claim, "총입금액": total_paid, "미수잔액": unpaid_amt,
+                    "총청구건": total_cnt, "완납건": completed_cnt, "미수건": unpaid_cnt, "지연건": ever_delayed_cnt,
+                    "수금률(%)": round(total_paid / total_claim * 100, 1) if total_claim else 0,
+                    "지연률(%)": round(ever_delayed_cnt / total_cnt * 100, 1) if total_cnt else 0,
                 })
-            company_df = pd.DataFrame(rows)
-            csv_data_co = company_df.to_csv(index=False).encode("utf-8-sig")
-            render_html_table(company_df, money_cols=["총계약금", "미수금", "입금액", "계산서발행액"])
-            st.download_button("📥 CSV 다운로드", csv_data_co,
-                                file_name=f"거래업체별_현황_{date.today()}.csv", mime="text/csv")
+            manager_df = pd.DataFrame(rows)
+            render_html_table(manager_df, money_cols=["총청구금액", "총입금액", "미수잔액"])
+            st.download_button("📥 CSV 다운로드", manager_df.to_csv(index=False).encode("utf-8-sig"),
+                                file_name=f"기성청구현황_담당자별_{date.today()}.csv", mime="text/csv")
+
+            st.divider()
+            st.markdown("#### 🔍 담당자 상세 (채권종류별 3단 현황)")
+            pick_m = st.selectbox("담당자 선택", managers)
+            mc = claim_df_all[claim_df_all["담당자"] == pick_m]
+
+            st.markdown("**1. 청구현황** (채권종류별 전체 건수·금액)")
+            t1 = mc.groupby("채권종류").agg(건수=("id", "count"), 금액=("청구금액", "sum")).reset_index()
+            render_html_table(t1, money_cols=["금액"], left_cols=[])
+
+            st.markdown("**2. 미수현황** (채권종류별 미수 건수·금액)")
+            mc_unpaid = mc[mc["미수잔액"] > 0]
+            if mc_unpaid.empty:
+                st.caption("미수 없음")
+            else:
+                t2 = mc_unpaid.groupby("채권종류").agg(건수=("id", "count"), 미수금액=("미수잔액", "sum")).reset_index()
+                render_html_table(t2, money_cols=["미수금액"], left_cols=[])
+
+            st.markdown("**3. 지연현황** (채권종류별 지연 건수·총지연일수)")
+            mc_delayed = mc[mc["지연이력있음"]]
+            if mc_delayed.empty:
+                st.caption("지연 이력 없음")
+            else:
+                t3 = mc_delayed.groupby("채권종류").agg(건수=("id", "count"), 총지연일수=("총지연일수", "sum")).reset_index()
+                render_html_table(t3, money_cols=[], left_cols=[])
 
 # ==========================================================================
-# TAB: 입금 캘린더 (외부 패키지 없이 순수 스트림릿으로 직접 그림)
+# TAB: 입금 캘린더 (이력 데이터만)
 # ==========================================================================
 with tab_calendar:
     st.subheader("📅 입금 캘린더")
-    sites_df, claims_df, payments_df, invoices_df, history_df = load_all()
+    with engine.connect() as conn:
+        claims_df = pd.read_sql("SELECT * FROM claims WHERE current_due_date IS NOT NULL AND current_due_date != '';", conn)
 
     if claims_df.empty:
-        st.info("등록된 청구가 없습니다.")
+        st.info("데이터가 없습니다.")
     else:
-        import calendar as pycal
-
         today = date.today()
-        merged = claims_df.merge(sites_df[["id", "site_name"]], left_on="site_id", right_on="id", suffixes=("", "_site"))
-        merged = merged[merged["current_due_date"].notna() & (merged["current_due_date"] != "")]
-
         if "cal_year" not in st.session_state:
             st.session_state.cal_year = today.year
             st.session_state.cal_month = today.month
@@ -538,12 +459,11 @@ with tab_calendar:
                 st.session_state.cal_year += 1
             st.rerun()
 
-        st.caption("🔴 지연  🟢 입금완료  (날짜를 누르면 그날 전체 목록이 아래 뜹니다)")
-
+        st.caption("🔴 미입금(지연)  🟢 입금완료")
         yr, mo = st.session_state.cal_year, st.session_state.cal_month
 
         day_entries = {}
-        for _, c in merged.iterrows():
+        for _, c in claims_df.iterrows():
             d = safe_date(c["current_due_date"])
             if d and d.year == yr and d.month == mo:
                 st_disp = display_status(c["status"], c["current_due_date"], today)
@@ -555,14 +475,11 @@ with tab_calendar:
                     color = "#888888"
                 site_short = c["site_name"][:16] + ("…" if len(c["site_name"]) > 16 else "")
                 amt_disp = f"{int(c['claim_amount']) // 1000:,}"
-                day_entries.setdefault(d.day, []).append({
-                    "site": site_short, "claim_type": c["claim_type"], "amt": amt_disp, "color": color
-                })
+                day_entries.setdefault(d.day, []).append({"site": site_short, "claim_type": c["claim_type"], "amt": amt_disp, "color": color})
 
-        cal = pycal.Calendar(firstweekday=6)  # 일요일 시작
+        cal = pycal.Calendar(firstweekday=6)
         weeks = cal.monthdayscalendar(yr, mo)
         weekday_labels = ["일", "월", "화", "수", "목", "금", "토"]
-
         header_cols = st.columns(7)
         for i, lab in enumerate(weekday_labels):
             header_cols[i].markdown(f"<div style='text-align:center;font-weight:bold'>{lab}</div>", unsafe_allow_html=True)
@@ -580,38 +497,31 @@ with tab_calendar:
                     entries = day_entries.get(daynum, [])
                     if entries:
                         rows_html = ""
-                        for idx, e in enumerate(entries[:MAX_SHOWN]):
-                            border_style = "" if idx == len(entries[:MAX_SHOWN]) - 1 else "border-bottom:1px solid #eee;"
+                        shown = entries[:MAX_SHOWN]
+                        for idx, e in enumerate(shown):
+                            border_style = "" if idx == len(shown) - 1 else "border-bottom:1px solid #eee;"
                             rows_html += (
                                 f"<div style='padding:3px 2px;{border_style}'>"
-                                f"<div style='font-size:14px;font-weight:700;color:#000000;line-height:1.25;"
+                                f"<div style='font-size:14px;font-weight:700;color:#000;line-height:1.25;"
                                 f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis' title='{e['site']}'>"
                                 f"<span style='color:{e['color']}'>●</span> {e['site']}</div>"
-                                "<div style='font-size:12px;color:#333333;display:flex;justify-content:space-between;'>"
-                                f"<span>{e['claim_type']}</span><span>{e['amt']}</span></div>"
-                                "</div>"
+                                "<div style='font-size:12px;color:#333;display:flex;justify-content:space-between;'>"
+                                f"<span>{e['claim_type']}</span><span>{e['amt']}</span></div></div>"
                             )
-                        more_html = ""
-                        if len(entries) > MAX_SHOWN:
-                            more_html = f"<div style='font-size:11px;color:#888;padding-top:2px;'>+{len(entries) - MAX_SHOWN}건 더</div>"
-                        st.markdown(
-                            f"<div style='border:1px solid #d9d9d9;border-radius:6px;padding:4px 6px;'>"
-                            f"{rows_html}{more_html}</div>",
-                            unsafe_allow_html=True
-                        )
+                        more_html = f"<div style='font-size:11px;color:#888;'>+{len(entries)-MAX_SHOWN}건 더</div>" if len(entries) > MAX_SHOWN else ""
+                        st.markdown(f"<div style='border:1px solid #d9d9d9;border-radius:6px;padding:4px 6px;'>{rows_html}{more_html}</div>", unsafe_allow_html=True)
 
         sel_date = st.session_state.get("cal_selected_date")
         if sel_date:
             st.divider()
             st.markdown(f"#### 📌 {sel_date} 입금예정 목록")
             day_rows = []
-            for _, c in merged.iterrows():
+            for _, c in claims_df.iterrows():
                 d = safe_date(c["current_due_date"])
                 if d and d.isoformat() == sel_date:
                     day_rows.append({
                         "현장명": c["site_name"], "채권종류": c["claim_type"], "청구금액": c["claim_amount"],
                         "상태": display_status(c["status"], c["current_due_date"], today),
-                        "지연사유": c["delay_reason"] or "-",
                     })
             if day_rows:
                 render_html_table(pd.DataFrame(day_rows), money_cols=["청구금액"])
@@ -619,22 +529,21 @@ with tab_calendar:
                 st.info("해당 날짜에 예정된 청구가 없습니다.")
 
 # ==========================================================================
-# TAB: 리스크 현장
+# TAB: 리스크 현장 (이력 데이터만)
 # ==========================================================================
 with tab_risk:
     st.subheader("🚨 리스크 현장")
-    st.caption("완납되지 않은 청구 중 지연 3회 이상이거나 지연일수 30일 이상인 건이 있는 현장을 모았습니다. (완납된 청구는 제외)")
-    sites_df, claims_df, payments_df, invoices_df, history_df = load_all()
+    st.caption("완납되지 않은 청구 중 지연 3회 이상이거나 지연일수 30일 이상인 건이 있는 현장. (완납 청구는 제외)")
+    with engine.connect() as conn:
+        claims_df = pd.read_sql("SELECT * FROM claims WHERE status != '완납';", conn)
+        history_df = pd.read_sql("SELECT * FROM claim_delay_history;", conn)
 
     if claims_df.empty:
-        st.info("등록된 청구가 없습니다.")
+        st.info("데이터가 없습니다.")
     else:
         today = date.today()
-        merged = claims_df.merge(sites_df[["id", "site_name", "manager"]], left_on="site_id", right_on="id", suffixes=("", "_site"))
-        open_claims = merged[merged["status"] != "완납"]
-
         risk_rows = []
-        for _, c in open_claims.iterrows():
+        for _, c in claims_df.iterrows():
             cid = c["id"]
             hist = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
             delay_count = len(hist)
@@ -642,11 +551,16 @@ with tab_risk:
             sev = claim_severity(delay_count, delay_days)
             if sev == 0:
                 continue
+            reasons = []
+            if delay_count >= 3:
+                reasons.append(f"지연 {delay_count}회")
+            if delay_days >= 30:
+                reasons.append(f"{delay_days}일 지연")
             risk_rows.append({
                 "현장명": c["site_name"], "담당자": c["manager"], "채권종류": c["claim_type"],
                 "청구금액": c["claim_amount"], "입금예정일": c["current_due_date"],
                 "지연횟수": delay_count, "지연일수": delay_days, "등급": SEVERITY_LABEL[sev], "_sev": sev,
-                "지연사유": c["delay_reason"] or "-",
+                "사유": ", ".join(reasons),
             })
 
         if not risk_rows:
@@ -663,810 +577,270 @@ with tab_risk:
 
             st.divider()
             st.markdown("#### 현장별 등급 요약")
-            st.dataframe(site_sev.sort_values("현장등급", ascending=False), use_container_width=True)
+            render_html_table(site_sev.sort_values("현장등급", ascending=False), left_cols=[])
 
             st.divider()
             st.markdown("#### 리스크 청구 상세")
             display_risk = risk_df.drop(columns=["_sev"]).sort_values("지연일수", ascending=False)
-            csv_data_risk = display_risk.to_csv(index=False).encode("utf-8-sig")
             render_html_table(display_risk, money_cols=["청구금액"])
-            st.download_button("📥 CSV 다운로드", csv_data_risk,
+            st.download_button("📥 CSV 다운로드", display_risk.to_csv(index=False).encode("utf-8-sig"),
                                 file_name=f"리스크현장_{date.today()}.csv", mime="text/csv")
 
 # ==========================================================================
-# TAB: 관리자
+# TAB: 계약현황 (미수내역 전체 - 활성/완불 구분 없이 계약년월 있는 모든 행)
+# ==========================================================================
+with tab_contract:
+    st.subheader("📈 계약현황 (연도별)")
+    with engine.connect() as conn:
+        sr_df = pd.read_sql("SELECT * FROM site_receivables;", conn)
+
+    if sr_df.empty:
+        st.info("데이터가 없습니다.")
+    else:
+        sr_df["_ym"] = pd.to_datetime(sr_df["contract_yearmonth"], errors="coerce")
+        sr_df = sr_df[sr_df["_ym"].notna()]
+        sr_df["연도"] = sr_df["_ym"].dt.year
+        sr_df["월"] = sr_df["_ym"].dt.month
+        sr_df["_total"] = sr_df["contract_amount"] + sr_df["change_amount"]
+
+        yearly = sr_df.groupby("연도").agg(총계약금액=("_total", "sum"), 현장수=("id", "count")).reset_index()
+        for branch in sorted(sr_df["branch"].dropna().unique().tolist()):
+            b = sr_df[sr_df["branch"] == branch].groupby("연도")["_total"].sum()
+            yearly[f"{branch}계약금액"] = yearly["연도"].map(b).fillna(0).astype(int)
+
+        money_cols = [c for c in yearly.columns if "계약금액" in c]
+        render_html_table(yearly.sort_values("연도"), money_cols=money_cols, left_cols=[])
+
+        st.divider()
+        sel_year = st.selectbox("월별로 보기", sorted(sr_df["연도"].unique().tolist(), reverse=True))
+        monthly = sr_df[sr_df["연도"] == sel_year].groupby("월").agg(계약금액=("_total", "sum"), 현장수=("id", "count")).reset_index()
+        render_html_table(monthly, money_cols=["계약금액"], left_cols=[])
+
+        st.download_button("📥 연도별 CSV 다운로드", yearly.to_csv(index=False).encode("utf-8-sig"),
+                            file_name=f"계약현황_연도별_{date.today()}.csv", mime="text/csv")
+
+# ==========================================================================
+# TAB: 관리자 — 엑셀 업로드 2개만
 # ==========================================================================
 with tab_admin:
     st.subheader("🔐 관리자")
-
     if not is_admin:
         st.warning("🔒 관리자 전용 메뉴입니다. 왼쪽 사이드바에서 비밀번호를 입력하세요.")
     else:
-        action = st.radio(
-            "작업 선택",
-            ["📋 미수관리(완료현장) 일괄 등록", "📂 엑셀(이력) 일괄 등록", "🏢 공사현황 정보 일괄 등록", "📝 신규 현장/청구 등록",
-             "💰 입금 처리", "🗓️ 예정일 연기", "🕒 지연 이력 조회", "📄 계산서 발행 관리", "🛠️ 삭제/병합"],
-            horizontal=True
-        )
-        st.divider()
+        st.markdown("업로드하면 **해당 데이터 전체가 지금 올리는 파일 내용으로 갈음**됩니다 (기존 것 삭제 후 새로 채움).")
 
-        # ---------------- 미수관리(완료현장) 일괄 등록 ----------------
-        if action == "📋 미수관리(완료현장) 일괄 등록":
-            st.caption(
-                "완료된(입금 다 끝난) 현장들의 계약정보 + 계산서 발행 + 입금내역을 기준 데이터로 먼저 깔아두는 메뉴입니다. "
-                "이거 먼저 올리고, 나중에 '📂 엑셀(이력) 일괄 등록'으로 최근 진행 중인 청구를 덮어씌우는 순서를 추천드립니다. "
-                "같은 현장 + 같은 채권종류 + 같은 금액으로 이미 완납된 게 있으면 자동으로 건너뛰어서 중복 등록을 막습니다."
-            )
-            template_csv = (
-                "현장명,업체명,담당자,계약일,착공일,준공일,계약금액,추가계약,공정율,기성구분,계산서발행일,계산서발행금액,입금일,입금금액\n"
-                "예시)칠곡군 동명면 남원리 595-9 단독주택,케이비건설/라움ADI,김효철 차장,2022-06-03,2022-06-04,2022-11-04,73700000,0,100,선급금,2022-06-10,29480000,2022-06-15,29480000\n"
-                "예시)칠곡군 동명면 남원리 595-9 단독주택,케이비건설/라움ADI,김효철 차장,2022-06-03,2022-06-04,2022-11-04,73700000,0,100,잔금,2022-11-01,44220000,2022-11-04,44220000\n"
-            )
-            st.download_button("📥 업로드 양식(템플릿) 다운로드", data=template_csv.encode("utf-8-sig"),
-                                file_name="미수관리_업로드양식.csv", mime="text/csv", use_container_width=True)
-            st.caption(
-                "※ 한 현장에 계산서/입금 건이 여러 개면, 같은 현장명으로 줄을 여러 개 나눠서 적어주세요 "
-                "(계약정보는 매 줄 똑같이 반복 입력하시면 됩니다). 계산서나 입금 정보가 없는 줄은 그 칸들만 비워두면 됩니다."
-            )
+        # ---------------- 일일수금관리 업로드 ----------------
+        st.markdown("### 📂 일일수금관리 업로드 (기성청구현황·캘린더·리스크현장)")
+        daily_file = st.file_uploader("일일수금관리 엑셀(.xlsx) 업로드", type=["xlsx", "csv"], key="daily_upload")
 
-            st.divider()
-            base_file = st.file_uploader("작성한 양식(CSV/엑셀) 업로드", type=["xlsx", "csv"], key="base_upload")
+        if daily_file is not None and st.button("🚀 일일수금관리 데이터로 전체 갱신", use_container_width=True):
+            try:
+                xls = pd.ExcelFile(daily_file, engine="openpyxl")
+                frames = []
+                for sheet in ["이력", "장기미수"]:
+                    if sheet in xls.sheet_names:
+                        raw = pd.read_excel(xls, sheet_name=sheet, header=1)
+                        frames.append(raw)
+                if not frames:
+                    st.error("'이력' 시트를 찾지 못했습니다.")
+                    st.stop()
+                raw_df = pd.concat(frames, ignore_index=True)
+                raw_df.columns = [str(c).strip() for c in raw_df.columns]
 
-            if base_file is not None:
-                try:
-                    if base_file.name.endswith(".csv"):
-                        raw_bytes = base_file.read()
-                        base_df = None
-                        for enc in ["utf-8-sig", "cp949", "euc-kr", "utf-8"]:
-                            try:
-                                base_df = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc)
-                                break
-                            except (UnicodeDecodeError, UnicodeError):
-                                continue
-                        if base_df is None:
-                            st.error("❌ 인코딩 인식 불가.")
-                            st.stop()
-                    else:
-                        base_df = pd.read_excel(base_file, engine="openpyxl")
+                col_map = {
+                    "채권명": "bond_name", "현장명": "site_name", "업체명": "company_name",
+                    "담당자": "manager", "기성구분": "claim_type", "미수금액": "claim_amount",
+                    "최초예정일": "original_due_date", "입금예정일": "current_due_date",
+                    "지연여부": "status_raw", "입금여부": "paid_flag", "입금액": "paid_amount",
+                }
+                for c in list(raw_df.columns):
+                    if "입금상태" in c or "입금일자" in c:
+                        col_map[c] = "payment_date_raw"
+                raw_df = raw_df.rename(columns={k: v for k, v in col_map.items() if k in raw_df.columns})
+                raw_df = raw_df.dropna(subset=["bond_name"]) if "bond_name" in raw_df.columns else raw_df.dropna(subset=["site_name"])
+                raw_df["_due_sort"] = pd.to_datetime(raw_df.get("current_due_date"), errors="coerce")
 
-                    base_df.columns = [str(c).strip() for c in base_df.columns]
-                    base_df = base_df.dropna(subset=["현장명"])
-                    base_df = base_df[~base_df["현장명"].astype(str).str.startswith("예시)")]
-                    base_df = base_df[base_df["현장명"].astype(str).str.strip() != ""]
-
-                    st.write(f"📋 미리보기 ({len(base_df)}건):")
-                    st.dataframe(base_df.head(20), use_container_width=True)
-
-                    if st.button("🚀 미수관리 기준 데이터 일괄 반영", use_container_width=True):
-                        with engine.connect() as conn:
-                            site_created, site_updated, invoice_cnt, claim_cnt, skipped = 0, 0, 0, 0, 0
-                            for _, row in base_df.iterrows():
-                                site_name = str(row["현장명"]).strip()
-                                if not site_name or site_name == "nan":
-                                    continue
-
-                                existing = conn.execute(text("SELECT id FROM sites WHERE site_name=:sn"), {"sn": site_name}).fetchone()
-                                if not existing:
-                                    res = conn.execute(text("INSERT INTO sites (site_name) VALUES (:sn)"), {"sn": site_name})
-                                    site_id = res.lastrowid
-                                    site_created += 1
-                                else:
-                                    site_id = existing[0]
-                                    site_updated += 1
-
-                                cd = safe_date(row.get("계약일")); sd = safe_date(row.get("착공일")); ed = safe_date(row.get("준공일"))
-                                update_sql = """
-                                    UPDATE sites SET contract_amount=:ca, additional_amount=:aa, progress_rate=:pr,
-                                           contract_date=:cd, start_date=:sd, completion_date=:ed
-                                """
-                                params = {"ca": parse_amount(row.get("계약금액", 0)), "aa": parse_amount(row.get("추가계약", 0)),
-                                          "pr": float(row.get("공정율", 0) or 0),
-                                          "cd": cd.isoformat() if cd else None, "sd": sd.isoformat() if sd else None,
-                                          "ed": ed.isoformat() if ed else None, "sid": site_id}
-                                company_v = row.get("업체명"); manager_v = row.get("담당자")
-                                if company_v and str(company_v).strip() and str(company_v).strip() != "nan":
-                                    update_sql += ", company_name=:cn"
-                                    params["cn"] = str(company_v).strip()
-                                if manager_v and str(manager_v).strip() and str(manager_v).strip() != "nan":
-                                    update_sql += ", manager=:mg"
-                                    params["mg"] = str(manager_v).strip()
-                                update_sql += " WHERE id=:sid"
-                                conn.execute(text(update_sql), params)
-
-                                claim_type_v = str(row.get("기성구분", "") or "").strip() or "기성금"
-
-                                inv_date = safe_date(row.get("계산서발행일"))
-                                inv_amt = parse_amount(row.get("계산서발행금액", 0))
-                                if inv_date and inv_amt > 0:
-                                    conn.execute(text("""
-                                        INSERT INTO tax_invoices (site_id, claim_type, issue_date, invoice_amount)
-                                        VALUES (:sid, :ctype, :idate, :amt)
-                                    """), {"sid": site_id, "ctype": claim_type_v, "idate": inv_date.isoformat(), "amt": inv_amt})
-                                    invoice_cnt += 1
-
-                                pay_date = safe_date(row.get("입금일"))
-                                pay_amt = parse_amount(row.get("입금금액", 0))
-
-                                # 청구금액: 계산서 발행액이 있으면 그걸 기준, 없으면 입금액 기준 (입금만 있고 계산서 정보 없는 경우 대비)
-                                claim_amount_v = inv_amt if inv_amt > 0 else pay_amt
-
-                                if claim_amount_v > 0:
-                                    dup = conn.execute(text("""
-                                        SELECT id FROM claims
-                                        WHERE site_id=:sid AND claim_type=:ctype AND claim_amount=:amt
-                                        LIMIT 1
-                                    """), {"sid": site_id, "ctype": claim_type_v, "amt": claim_amount_v}).fetchone()
-                                    if dup:
-                                        skipped += 1
-                                    else:
-                                        due_ref = inv_date or pay_date or cd
-                                        orig_due_str = due_ref.isoformat() if due_ref else None
-
-                                        if pay_amt >= claim_amount_v and pay_amt > 0:
-                                            status_v = "완납"
-                                        elif pay_amt > 0:
-                                            status_v = "일부입금"
-                                        else:
-                                            status_v = "입금대기"
-
-                                        cur_due_str = (pay_date or due_ref).isoformat() if (pay_date or due_ref) else None
-
-                                        res = conn.execute(text("""
-                                            INSERT INTO claims (site_id, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status)
-                                            VALUES (:sid, :ctype, :cdate, :cdate, :cdate2, :amt, :status)
-                                        """), {"sid": site_id, "ctype": claim_type_v, "cdate": orig_due_str,
-                                               "cdate2": cur_due_str, "amt": claim_amount_v, "status": status_v})
-                                        claim_id = res.lastrowid
-
-                                        if pay_amt > 0 and pay_date:
-                                            conn.execute(text("""
-                                                INSERT INTO payments (site_id, claim_id, payment_date, payment_amount)
-                                                VALUES (:sid, :cid, :pdate, :pamt)
-                                            """), {"sid": site_id, "cid": claim_id, "pdate": pay_date.isoformat(), "pamt": pay_amt})
-                                            if status_v == "완납":
-                                                conn.execute(text("""
-                                                    INSERT INTO claim_delay_history (claim_id, event_type, payment_date, delay_days, reason)
-                                                    VALUES (:cid, '입금완료(정상)', :pdate, 0, '미수관리 기준데이터 가져오기')
-                                                """), {"cid": claim_id, "pdate": pay_date.isoformat()})
-                                        claim_cnt += 1
-                            conn.commit()
-                        st.success(
-                            f"✅ 반영 완료! 현장 신규 {site_created}건 / 갱신 {site_updated}건, "
-                            f"계산서 {invoice_cnt}건, 입금청구 {claim_cnt}건 생성, 중복 방지로 {skipped}건 건너뜀"
-                        )
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"❌ 파일 처리 오류: {e}")
-
-        # ---------------- 엑셀(이력) 일괄 등록 ----------------
-        elif action == "📂 엑셀(이력) 일괄 등록":
-            st.caption(
-                "원본 엑셀 '이력' 시트를 xlsx 그대로 올리거나 CSV로 저장해서 올리세요. "
-                "채권명·현장명·업체명·담당자·기성구분·미수금액(청구금액)·최초예정일·입금예정일·입금여부·입금액·입금상태(입금일자) 인식합니다. "
-                "AS 청구도 이제 원래 현장 그대로 들어갑니다 (공사현황에서만 별도 합산됩니다)."
-            )
-            uploaded_file = st.file_uploader("엑셀(.xlsx) 또는 CSV 업로드", type=["xlsx", "csv"], key="bulk_upload")
-
-            if uploaded_file is not None:
-                try:
-                    def find_header_row(df_noheader):
-                        for i in range(min(10, len(df_noheader))):
-                            row_vals = [str(v) for v in df_noheader.iloc[i].tolist()]
-                            if any(("채권명" in v) or ("현장명" in v) for v in row_vals):
-                                return i
-                        return 0
-
-                    if uploaded_file.name.endswith(".csv"):
-                        raw_bytes = uploaded_file.read()
-                        raw_df = None
-                        for enc in ["utf-8-sig", "cp949", "euc-kr", "utf-8"]:
-                            try:
-                                no_header = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, header=None)
-                                hdr_row = find_header_row(no_header)
-                                raw_df = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, header=hdr_row)
-                                break
-                            except (UnicodeDecodeError, UnicodeError):
-                                continue
-                        if raw_df is None:
-                            st.error("❌ 인코딩 인식 불가. CSV UTF-8로 다시 저장해주세요.")
-                            st.stop()
-                    else:
-                        no_header = pd.read_excel(uploaded_file, engine="openpyxl", header=None)
-                        hdr_row = find_header_row(no_header)
-                        uploaded_file.seek(0)
-                        raw_df = pd.read_excel(uploaded_file, engine="openpyxl", header=hdr_row)
-
-                    raw_df.columns = [str(c).strip() for c in raw_df.columns]
-
-                    def norm(s):
-                        return str(s).replace("\n", "").replace(" ", "").strip()
-
-                    col_lookup = {norm(c): c for c in raw_df.columns}
-
-                    def find_col(*keywords):
-                        for norm_name, orig_name in col_lookup.items():
-                            if all(kw in norm_name for kw in keywords):
-                                return orig_name
-                        return None
-
-                    rename_map = {}
-                    for kw, target in [("채권명", "bond_name"), ("현장명", "site_name"), ("업체명", "company_name"),
-                                        ("담당자", "manager"), ("기성구분", "claim_type"),
-                                        ("입금예정일", "current_due_date"), ("최초예정일", "original_due_date"),
-                                        ("지연여부", "status_raw"), ("입금여부", "paid_flag"), ("입금액", "paid_amount")]:
-                        c = find_col(kw)
-                        if c:
-                            rename_map[c] = target
-                    amt_col = find_col("미수금액") or find_col("청구금액")
-                    if amt_col:
-                        rename_map[amt_col] = "claim_amount"
-                    pay_date_col = find_col("입금상태") or find_col("입금일자")
-                    if pay_date_col and pay_date_col not in rename_map:
-                        rename_map[pay_date_col] = "payment_date_raw"
-
-                    raw_df = raw_df.rename(columns=rename_map)
-
-                    required = ["site_name", "claim_type", "claim_amount", "current_due_date"]
-                    missing = [c for c in required if c not in raw_df.columns]
-                    if missing:
-                        st.error(f"❌ 필수 컬럼 누락: {missing}")
-                        st.write("현재 인식된 컬럼:", list(raw_df.columns))
-                        st.dataframe(raw_df.head(5), use_container_width=True)
-                    else:
-                        raw_df = raw_df.dropna(subset=["site_name"])
-                        raw_df["_due_sort"] = pd.to_datetime(raw_df["current_due_date"], errors="coerce")
-
-                        st.write("📋 미리보기:")
-                        st.dataframe(raw_df.head(30), use_container_width=True)
-
-                        has_bond = "bond_name" in raw_df.columns
-                        n_bonds = raw_df["bond_name"].nunique() if has_bond else len(raw_df)
-                        st.info(f"총 {len(raw_df)}행 / 실제 청구(채권) {n_bonds}건 등록 예정 (현장 수 {raw_df['site_name'].nunique()}개)")
-
-                        if st.button("🚀 현장 + 청구 + 입금/지연 이력 일괄 등록 실행", use_container_width=True):
-                            group_key = "bond_name" if has_bond else raw_df.index
-                            groups = raw_df.groupby(group_key) if has_bond else [(i, raw_df.loc[[i]]) for i in raw_df.index]
-
-                            with engine.connect() as conn:
-                                for _, grp in groups:
-                                    grp = grp.sort_values("_due_sort", na_position="last")
-                                    first = grp.iloc[0]
-                                    last = grp.iloc[-1]
-
-                                    site_name = str(first["site_name"]).strip()
-                                    company_name = str(first.get("company_name", "") or "")
-                                    manager = str(first.get("manager", "") or "")
-
-                                    existing = conn.execute(text("SELECT id FROM sites WHERE site_name=:sn"), {"sn": site_name}).fetchone()
-                                    if existing:
-                                        site_id = existing[0]
-                                    else:
-                                        res = conn.execute(text("""
-                                            INSERT INTO sites (site_name, company_name, manager) VALUES (:sn, :cn, :mg)
-                                        """), {"sn": site_name, "cn": company_name, "mg": manager})
-                                        site_id = res.lastrowid
-
-                                    claim_amount = parse_amount(last.get("claim_amount", 0))
-                                    orig_due = safe_date(first.get("original_due_date")) or safe_date(first.get("current_due_date"))
-                                    orig_due_str = orig_due.isoformat() if orig_due else None
-
-                                    # 그룹 안의 '모든' 행을 훑어서, 입금여부=Y + 입금액>0 인 행은 전부
-                                    # 별개의 입금 이벤트로 취급 (한 청구가 여러 번 나눠 입금된 경우 다 잡아내기 위함)
-                                    payment_events = []
-                                    for _, r in grp.iterrows():
-                                        r_paid_flag = str(r.get("paid_flag", "") or "").strip().upper()
-                                        r_paid_amount = parse_amount(r.get("paid_amount", 0))
-                                        if r_paid_flag == "Y" and r_paid_amount > 0:
-                                            r_pay_date = safe_date(r.get("payment_date_raw")) or safe_date(r.get("current_due_date"))
-                                            payment_events.append((r_pay_date, r_paid_amount))
-
-                                    total_paid_in_group = sum(a for _, a in payment_events)
-
-                                    cur_due = safe_date(last.get("current_due_date"))
-                                    cur_due_str = cur_due.isoformat() if cur_due else None
-                                    status_raw = str(last.get("status_raw", "") or "")
-
-                                    if total_paid_in_group >= claim_amount and claim_amount > 0:
-                                        status = "완납"
-                                    elif total_paid_in_group > 0:
-                                        status = "일부입금"
-                                    elif cur_due_str is None:
-                                        status = "확인필요"
-                                    else:
-                                        status = "입금대기"
-
-                                    if status == "완납":
-                                        dup = conn.execute(text("""
-                                            SELECT id FROM claims
-                                            WHERE site_id=:sid AND claim_type=:ctype AND claim_amount=:amt AND status='완납'
-                                            LIMIT 1
-                                        """), {"sid": site_id, "ctype": last["claim_type"], "amt": claim_amount}).fetchone()
-                                        if dup:
-                                            continue  # 이미 완납 처리된 동일 건 (다른 파일에서 먼저 들어옴) - 중복 등록 방지
-
-                                    res = conn.execute(text("""
-                                        INSERT INTO claims (site_id, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status)
-                                        VALUES (:s_id, :ctype, :c_date, :o_due, :c_due, :amt, :status)
-                                    """), {"s_id": site_id, "ctype": last["claim_type"], "c_date": orig_due_str,
-                                           "o_due": orig_due_str, "c_due": cur_due_str, "amt": claim_amount, "status": status})
-                                    claim_id = res.lastrowid
-
-                                    # 이력 안에서 예정일이 바뀐 구간들을 '자동지연' 이력으로 복원
-                                    prev_due = orig_due
-                                    for _, r in grp.iterrows():
-                                        this_due = safe_date(r.get("current_due_date"))
-                                        if this_due and prev_due and this_due != prev_due:
-                                            conn.execute(text("""
-                                                INSERT INTO claim_delay_history (claim_id, event_type, old_due_date, new_due_date, delay_days, reason)
-                                                VALUES (:cid, '자동지연', :old, :new, :ddays, '엑셀 이력 데이터 가져오기')
-                                            """), {"cid": claim_id, "old": prev_due.isoformat(), "new": this_due.isoformat(),
-                                                   "ddays": (this_due - prev_due).days})
-                                        if this_due:
-                                            prev_due = this_due
-
-                                    # 모든 입금 이벤트를 각각 별개의 payments 레코드로 등록
-                                    last_pay_date = None
-                                    for pdate, pamt in payment_events:
-                                        pdate_final = pdate or cur_due or date.today()
-                                        conn.execute(text("""
-                                            INSERT INTO payments (site_id, claim_id, payment_date, payment_amount)
-                                            VALUES (:sid, :cid, :pdate, :pamt)
-                                        """), {"sid": site_id, "cid": claim_id, "pdate": pdate_final.isoformat(), "pamt": pamt})
-                                        last_pay_date = pdate_final
-
-                                    if status == "완납" and last_pay_date:
-                                        delay_days = 0
-                                        event_type = "입금완료(정상)"
-                                        if orig_due and last_pay_date > orig_due:
-                                            delay_days = (last_pay_date - orig_due).days
-                                            event_type = "입금완료(지연)"
-                                        conn.execute(text("""
-                                            INSERT INTO claim_delay_history (claim_id, event_type, old_due_date, new_due_date, payment_date, delay_days, reason)
-                                            VALUES (:cid, :etype, :old, :old, :pdate, :ddays, '엑셀 이력 데이터 가져오기')
-                                        """), {"cid": claim_id, "etype": event_type, "old": cur_due_str,
-                                               "pdate": last_pay_date.isoformat(), "ddays": delay_days})
-                                conn.commit()
-                            st.success("✅ 현장 + 청구 + 입금/지연 이력까지 일괄 등록 완료!")
-                            st.rerun()
-                except Exception as e:
-                    st.error(f"❌ 파일 처리 오류: {e}")
-
-        # ---------------- 공사현황 정보 일괄 등록 ----------------
-        elif action == "🏢 공사현황 정보 일괄 등록":
-            st.caption(
-                "계약금액, 추가계약, 계약일, 착공일, 준공일, 공정율, 업체명, 담당자를 엑셀로 한 번에 입력합니다. "
-                "직접 만든 템플릿뿐 아니라, 사장님이 따로 관리하시는 '현장별 미수관리' 엑셀의 계약현황 시트를 그대로 올려도 됩니다 "
-                "(공사명/총 계약금액/변경계약 같은 컬럼명도 자동으로 인식합니다)."
-            )
-            with engine.connect() as conn:
-                cur_sites = pd.read_sql(
-                    "SELECT site_name, contract_amount, additional_amount, contract_date, start_date, completion_date, progress_rate FROM sites ORDER BY site_name;",
-                    conn
-                )
-            template_df = cur_sites.rename(columns={
-                "site_name": "현장명", "contract_amount": "계약금액", "additional_amount": "추가계약",
-                "contract_date": "계약일", "start_date": "착공일", "completion_date": "준공일", "progress_rate": "공정율"
-            })
-            st.download_button("📥 현재 현장 목록 템플릿 다운로드", data=template_df.to_csv(index=False).encode("utf-8-sig"),
-                                file_name="공사현황_입력템플릿.csv", mime="text/csv", use_container_width=True)
-
-            st.divider()
-            unit_thousand = st.checkbox("업로드하는 파일의 금액이 '천원' 단위인가요? (예: 73700 → 73,700,000원)")
-            site_info_file = st.file_uploader("작성한 템플릿 또는 현장관리 엑셀(xlsx/csv) 업로드", type=["xlsx", "csv"], key="site_info_upload")
-
-            if site_info_file is not None:
-                try:
-                    def find_site_header_row(df_noheader):
-                        for i in range(min(15, len(df_noheader))):
-                            row_vals = [str(v) for v in df_noheader.iloc[i].tolist()]
-                            if any(("공사명" in v) or ("현장명" in v) for v in row_vals):
-                                return i
-                        return 0
-
-                    if site_info_file.name.endswith(".csv"):
-                        raw_bytes = site_info_file.read()
-                        info_df = None
-                        for enc in ["utf-8-sig", "cp949", "euc-kr", "utf-8"]:
-                            try:
-                                no_header = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, header=None)
-                                hdr_row = find_site_header_row(no_header)
-                                info_df = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, header=hdr_row)
-                                break
-                            except (UnicodeDecodeError, UnicodeError):
-                                continue
-                        if info_df is None:
-                            st.error("❌ 인코딩 인식 불가.")
-                            st.stop()
-                    else:
-                        no_header = pd.read_excel(site_info_file, engine="openpyxl", header=None)
-                        hdr_row = find_site_header_row(no_header)
-                        site_info_file.seek(0)
-                        info_df = pd.read_excel(site_info_file, engine="openpyxl", header=hdr_row)
-
-                    info_df.columns = [str(c).strip() for c in info_df.columns]
-
-                    def norm(s):
-                        return str(s).replace("\n", "").replace(" ", "").strip()
-
-                    col_lookup = {norm(c): c for c in info_df.columns}
-
-                    def find_col(*keywords):
-                        for norm_name, orig_name in col_lookup.items():
-                            if all(kw in norm_name for kw in keywords):
-                                return orig_name
-                        return None
-
-                    rename_map = {}
-                    site_col = find_col("공사명") or find_col("현장명")
-                    if site_col:
-                        rename_map[site_col] = "현장명"
-                    for kw, target in [("업체명", "업체명"), ("담당자", "담당자"),
-                                        ("계약일", "계약일"), ("착공일", "착공일"), ("준공일", "준공일"),
-                                        ("공정율", "공정율")]:
-                        c = find_col(kw)
-                        if c and c not in rename_map:
-                            rename_map[c] = target
-                    amt_col = find_col("총계약금액") or find_col("계약금액")
-                    if amt_col:
-                        rename_map[amt_col] = "계약금액"
-                    add_col = find_col("변경계약") or find_col("추가계약")
-                    if add_col:
-                        rename_map[add_col] = "추가계약"
-
-                    info_df = info_df.rename(columns=rename_map)
-
-                    if "현장명" not in info_df.columns:
-                        st.error("❌ '현장명'(또는 공사명) 컬럼을 찾지 못했습니다.")
-                        st.write("현재 인식된 컬럼:", list(info_df.columns))
-                    else:
-                        info_df = info_df.dropna(subset=["현장명"])
-                        info_df = info_df[info_df["현장명"].astype(str).str.strip() != ""]
-                        st.write(f"📋 미리보기 ({len(info_df)}건):")
-                        st.dataframe(info_df.head(20), use_container_width=True)
-
-                        if st.button("🚀 공사현황 정보 일괄 반영", use_container_width=True):
-                            mult = 1000 if unit_thousand else 1
-                            with engine.connect() as conn:
-                                updated, created = 0, 0
-                                for _, row in info_df.iterrows():
-                                    site_name = str(row["현장명"]).strip()
-                                    if not site_name or site_name == "nan":
-                                        continue
-                                    existing = conn.execute(text("SELECT id FROM sites WHERE site_name=:sn"), {"sn": site_name}).fetchone()
-                                    if not existing:
-                                        res = conn.execute(text("INSERT INTO sites (site_name) VALUES (:sn)"), {"sn": site_name})
-                                        site_id = res.lastrowid
-                                        created += 1
-                                    else:
-                                        site_id = existing[0]
-                                        updated += 1
-
-                                    cd = safe_date(row.get("계약일")); sd = safe_date(row.get("착공일")); ed = safe_date(row.get("준공일"))
-                                    company_v = row.get("업체명")
-                                    manager_v = row.get("담당자")
-                                    progress_raw = row.get("공정율", 0) or 0
-                                    try:
-                                        progress_v = float(progress_raw)
-                                        if progress_v <= 1:  # 0~1 사이 소수(예: 0.9)면 % 로 환산
-                                            progress_v *= 100
-                                    except (TypeError, ValueError):
-                                        progress_v = 0
-
-                                    update_sql = """
-                                        UPDATE sites SET contract_amount=:ca, additional_amount=:aa, progress_rate=:pr,
-                                               contract_date=:cd, start_date=:sd, completion_date=:ed
-                                    """
-                                    params = {"ca": parse_amount(row.get("계약금액", 0)) * mult,
-                                              "aa": parse_amount(row.get("추가계약", 0)) * mult,
-                                              "pr": progress_v,
-                                              "cd": cd.isoformat() if cd else None, "sd": sd.isoformat() if sd else None,
-                                              "ed": ed.isoformat() if ed else None, "sid": site_id}
-                                    if company_v and str(company_v).strip() and str(company_v).strip() != "nan":
-                                        update_sql += ", company_name=:cn"
-                                        params["cn"] = str(company_v).strip()
-                                    if manager_v and str(manager_v).strip() and str(manager_v).strip() != "nan":
-                                        update_sql += ", manager=:mg"
-                                        params["mg"] = str(manager_v).strip()
-                                    update_sql += " WHERE id=:sid"
-
-                                    conn.execute(text(update_sql), params)
-                                conn.commit()
-                            st.success(f"✅ 반영 완료! (기존 {updated}건 갱신, 신규 {created}건 생성)")
-                            st.rerun()
-                except Exception as e:
-                    st.error(f"❌ 파일 처리 오류: {e}")
-
-        # ---------------- 신규 현장/청구 등록 ----------------
-        elif action == "📝 신규 현장/청구 등록":
-            st.markdown("#### 🏢 신규 현장 등록")
-            with st.form("site_form", clear_on_submit=True):
-                col1, col2 = st.columns(2)
-                site_name = col1.text_input("현장명 *")
-                company_name = col1.text_input("거래업체명")
-                manager = col2.text_input("담당자")
-                if st.form_submit_button("현장 등록"):
-                    if site_name:
-                        with engine.connect() as conn:
-                            try:
-                                conn.execute(text("INSERT INTO sites (site_name, company_name, manager) VALUES (:sn, :cn, :mg)"),
-                                             {"sn": site_name, "cn": company_name, "mg": manager})
-                                conn.commit()
-                                st.success("등록 완료!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"등록 실패 (중복 현장명일 수 있음): {e}")
-                    else:
-                        st.warning("현장명은 필수입니다.")
-
-            st.divider()
-            st.markdown("#### 📋 신규 청구 등록")
-            with engine.connect() as conn:
-                sites = pd.read_sql("SELECT id, site_name FROM sites ORDER BY site_name;", conn)
-            if not sites.empty:
-                site_dict = dict(zip(sites["site_name"], sites["id"]))
-                sel_site = st.selectbox("현장 선택", list(site_dict.keys()))
-                with st.form("claim_form", clear_on_submit=True):
-                    c1, c2, c3 = st.columns(3)
-                    claim_type = c1.selectbox("채권 종류", CLAIM_TYPES)
-                    claim_date_v = c2.date_input("청구일")
-                    due_date_v = c3.date_input("입금 예정일")
-                    claim_amount_v = st.number_input("청구 금액(원)", min_value=0, step=100000)
-                    if st.form_submit_button("청구 등록"):
-                        with engine.connect() as conn:
-                            conn.execute(text("""
-                                INSERT INTO claims (site_id, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status)
-                                VALUES (:sid, :ctype, :cdate, :odue, :cdue, :amt, '입금대기')
-                            """), {"sid": site_dict[sel_site], "ctype": claim_type, "cdate": str(claim_date_v),
-                                   "odue": str(due_date_v), "cdue": str(due_date_v), "amt": claim_amount_v})
-                            conn.commit()
-                        st.success("청구 등록 완료!")
-                        st.rerun()
-            else:
-                st.info("현장을 먼저 등록해주세요.")
-
-        # ---------------- 입금 처리 ----------------
-        elif action == "💰 입금 처리":
-            st.caption("현장을 먼저 골라서 청구 목록을 좁힌 다음, 처리할 청구를 선택하세요. 나눠서 입금돼도(일부입금) 같은 청구에 계속 쌓입니다.")
-            with engine.connect() as conn:
-                open_claims = pd.read_sql("""
-                    SELECT c.id, s.site_name, c.claim_type, c.claim_amount, c.current_due_date, c.status
-                    FROM claims c JOIN sites s ON c.site_id = s.id
-                    WHERE c.status != '완납'
-                """, conn)
-            if not open_claims.empty:
-                open_claims["_sort"] = pd.to_datetime(open_claims["current_due_date"], errors="coerce")
-                open_claims = open_claims.sort_values("_sort", na_position="last").drop(columns=["_sort"])
-
-            if open_claims.empty:
-                st.info("미완납 청구가 없습니다.")
-            else:
                 with engine.connect() as conn:
-                    paid_map = dict(pd.read_sql("SELECT claim_id, SUM(payment_amount) as p FROM payments GROUP BY claim_id;", conn).values)
+                    for t in ["claim_delay_history", "payments", "claims"]:
+                        conn.execute(text(f"DELETE FROM {t};"))
+                    conn.commit()
 
-                site_options = ["전체"] + sorted(open_claims["site_name"].unique().tolist())
-                site_pick = st.selectbox("현장 선택 (좁혀서 찾기)", site_options, key="pay_site_pick")
-                filtered = open_claims if site_pick == "전체" else open_claims[open_claims["site_name"] == site_pick]
+                    has_bond = "bond_name" in raw_df.columns
+                    groups = raw_df.groupby("bond_name") if has_bond else [(i, raw_df.loc[[i]]) for i in raw_df.index]
+                    n_claims = 0
+                    for _, grp in groups:
+                        grp = grp.sort_values("_due_sort", na_position="last")
+                        first, last = grp.iloc[0], grp.iloc[-1]
+                        site_name = str(first.get("site_name", "")).strip()
+                        manager = str(first.get("manager", "") or "")
+                        claim_type_v = str(last.get("claim_type", "") or "기성금")
+                        claim_amount = parse_amount(last.get("claim_amount", 0))
+                        orig_due = safe_date(first.get("original_due_date")) or safe_date(first.get("current_due_date"))
+                        orig_due_str = orig_due.isoformat() if orig_due else None
 
-                if filtered.empty:
-                    st.info("해당 현장에 미완납 청구가 없습니다.")
-                else:
-                    options = {}
-                    for r in filtered.itertuples():
-                        already_paid = paid_map.get(r.id, 0) or 0
-                        remain = r.claim_amount - already_paid
-                        options[f"#{r.id} | {r.site_name} | {r.claim_type} | 청구 {r.claim_amount:,}원 (남은 {remain:,}원) | 예정일 {r.current_due_date} | ({r.status})"] = r.id
+                        payment_events = []
+                        for _, r in grp.iterrows():
+                            pf = str(r.get("paid_flag", "") or "").strip().upper()
+                            pa = parse_amount(r.get("paid_amount", 0))
+                            if pf == "Y" and pa > 0:
+                                pdate = safe_date(r.get("payment_date_raw")) or safe_date(r.get("current_due_date"))
+                                payment_events.append((pdate, pa))
+                        total_paid = sum(a for _, a in payment_events)
 
-                    with st.form("payment_process_form"):
-                        pick = st.selectbox("입금 처리할 청구 선택", list(options.keys()))
-                        pay_date_v = st.date_input("실제 입금일", value=date.today())
-                        pay_amount_v = st.number_input("입금 금액(원)", min_value=0, step=100000)
-                        if st.form_submit_button("✅ 입금 처리"):
-                            claim_id = options[pick]
-                            with engine.connect() as conn:
-                                claim_row = conn.execute(
-                                    text("SELECT site_id, claim_amount, original_due_date FROM claims WHERE id=:cid"), {"cid": claim_id}
-                                ).fetchone()
-                                site_id, claim_amount, orig_due = claim_row
+                        cur_due = safe_date(last.get("current_due_date"))
+                        cur_due_str = cur_due.isoformat() if cur_due else None
+                        status_raw = str(last.get("status_raw", "") or "")
 
-                                conn.execute(text("""
-                                    INSERT INTO payments (site_id, claim_id, payment_date, payment_amount)
-                                    VALUES (:sid, :cid, :pdate, :pamt)
-                                """), {"sid": site_id, "cid": claim_id, "pdate": str(pay_date_v), "pamt": pay_amount_v})
+                        if total_paid >= claim_amount and claim_amount > 0:
+                            status = "완납"
+                        elif total_paid > 0:
+                            status = "일부입금"
+                        elif cur_due_str is None:
+                            status = "확인필요"
+                        else:
+                            status = "입금대기"
 
-                                total_paid = conn.execute(
-                                    text("SELECT SUM(payment_amount) FROM payments WHERE claim_id=:cid"), {"cid": claim_id}
-                                ).fetchone()[0] or 0
+                        res = conn.execute(text("""
+                            INSERT INTO claims (site_name, manager, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status)
+                            VALUES (:sn, :mg, :ctype, :cdate, :odue, :cdue, :amt, :status)
+                        """), {"sn": site_name, "mg": manager, "ctype": claim_type_v, "cdate": orig_due_str,
+                               "odue": orig_due_str, "cdue": cur_due_str, "amt": claim_amount, "status": status})
+                        claim_id = res.lastrowid
+                        n_claims += 1
 
-                                orig_due_d = safe_date(orig_due)
-                                if total_paid >= claim_amount:
-                                    new_status = "완납"
-                                    delay_days = 0
-                                    event_type = "입금완료(정상)"
-                                    if orig_due_d and pay_date_v > orig_due_d:
-                                        delay_days = (pay_date_v - orig_due_d).days
-                                        event_type = "입금완료(지연)"
-                                    conn.execute(text("""
-                                        INSERT INTO claim_delay_history (claim_id, event_type, payment_date, delay_days, reason)
-                                        VALUES (:cid, :etype, :pdate, :ddays, '입금 처리')
-                                    """), {"cid": claim_id, "etype": event_type, "pdate": str(pay_date_v), "ddays": delay_days})
-                                else:
-                                    new_status = "일부입금"
-
-                                conn.execute(text("UPDATE claims SET status=:status WHERE id=:cid"), {"status": new_status, "cid": claim_id})
-                                conn.commit()
-                            st.success(f"입금 처리 완료! (상태: {new_status}, 누적입금 {total_paid:,}원 / 청구 {claim_amount:,}원)")
-                            st.rerun()
-
-        # ---------------- 예정일 연기 ----------------
-        elif action == "🗓️ 예정일 연기":
-            st.caption("현장을 먼저 골라서 청구 목록을 좁힌 다음, 연기할 청구를 선택하세요.")
-            with engine.connect() as conn:
-                open_claims = pd.read_sql("""
-                    SELECT c.id, s.site_name, c.claim_type, c.claim_amount, c.current_due_date, c.status
-                    FROM claims c JOIN sites s ON c.site_id = s.id
-                    WHERE c.status != '완납'
-                """, conn)
-            if not open_claims.empty:
-                open_claims["_sort"] = pd.to_datetime(open_claims["current_due_date"], errors="coerce")
-                open_claims = open_claims.sort_values("_sort", na_position="last").drop(columns=["_sort"])
-
-            if open_claims.empty:
-                st.info("미완납 청구가 없습니다.")
-            else:
-                site_options = ["전체"] + sorted(open_claims["site_name"].unique().tolist())
-                site_pick = st.selectbox("현장 선택 (좁혀서 찾기)", site_options, key="postpone_site_pick")
-                filtered = open_claims if site_pick == "전체" else open_claims[open_claims["site_name"] == site_pick]
-
-                if filtered.empty:
-                    st.info("해당 현장에 미완납 청구가 없습니다.")
-                else:
-                    options = {
-                        f"#{r.id} | {r.site_name} | {r.claim_type} | {r.claim_amount:,}원 | 현재 예정일 {r.current_due_date} | ({r.status})": r.id
-                        for r in filtered.itertuples()
-                    }
-                    with st.form("postpone_form"):
-                        pick = st.selectbox("연기할 청구 선택", list(options.keys()))
-                        new_due = st.date_input("새 입금 예정일")
-                        new_status = st.selectbox("상태 변경", ["입금대기", "일부입금", "확인필요"])
-                        reason = st.text_input("연기 사유")
-                        if st.form_submit_button("🗓️ 예정일 변경 저장"):
-                            claim_id = options[pick]
-                            with engine.connect() as conn:
-                                old_due = conn.execute(text("SELECT current_due_date FROM claims WHERE id=:cid"), {"cid": claim_id}).fetchone()[0]
-                                conn.execute(text("""
-                                    UPDATE claims SET current_due_date=:new_due, status=:status, delay_reason=:reason, last_flagged_due_date=NULL
-                                    WHERE id=:cid
-                                """), {"new_due": str(new_due), "status": new_status, "reason": reason, "cid": claim_id})
-
-                                old_due_d = safe_date(old_due)
-                                ddays = (new_due - old_due_d).days if old_due_d else 0
+                        prev_due = orig_due
+                        for _, r in grp.iterrows():
+                            this_due = safe_date(r.get("current_due_date"))
+                            if this_due and prev_due and this_due != prev_due:
                                 conn.execute(text("""
                                     INSERT INTO claim_delay_history (claim_id, event_type, old_due_date, new_due_date, delay_days, reason)
-                                    VALUES (:cid, '연기', :old, :new, :ddays, :reason)
-                                """), {"cid": claim_id, "old": old_due, "new": str(new_due), "ddays": ddays, "reason": reason})
-                                conn.commit()
-                            st.success("예정일이 변경되었습니다. (지연횟수는 이 예정일도 지나야 다시 카운트됩니다)")
-                            st.rerun()
+                                    VALUES (:cid, '자동지연', :old, :new, :ddays, '엑셀 이력 가져오기')
+                                """), {"cid": claim_id, "old": prev_due.isoformat(), "new": this_due.isoformat(), "ddays": (this_due - prev_due).days})
+                            if this_due:
+                                prev_due = this_due
 
-        # ---------------- 지연 이력 조회 ----------------
-        elif action == "🕒 지연 이력 조회":
-            with engine.connect() as conn:
-                hist = pd.read_sql("""
-                    SELECT h.id, s.site_name, c.claim_type, c.claim_amount, h.event_type,
-                           h.changed_at, h.old_due_date, h.new_due_date, h.payment_date, h.delay_days, h.reason
-                    FROM claim_delay_history h
-                    JOIN claims c ON h.claim_id = c.id
-                    JOIN sites s ON c.site_id = s.id
-                    ORDER BY h.changed_at DESC;
-                """, conn)
-            if hist.empty:
-                st.info("아직 지연/연기/입금 이력이 없습니다.")
-            else:
-                site_pick = st.selectbox("현장 필터", ["전체"] + sorted(hist["site_name"].unique().tolist()))
-                disp = hist if site_pick == "전체" else hist[hist["site_name"] == site_pick]
-                render_html_table(disp, money_cols=["claim_amount"], left_cols=["site_name"])
-                st.divider()
-                st.markdown("#### 📊 청구별 누적 지연 횟수")
-                agg = hist[hist["event_type"] == "자동지연"].groupby(["site_name", "claim_type"]).agg(
-                    지연횟수=("event_type", "count"), 최대지연일수=("delay_days", "max")
-                ).reset_index()
-                st.dataframe(agg, use_container_width=True)
-
-        # ---------------- 계산서 발행 관리 ----------------
-        elif action == "📄 계산서 발행 관리":
-            with engine.connect() as conn:
-                sites = pd.read_sql("SELECT id, site_name FROM sites ORDER BY site_name;", conn)
-            if sites.empty:
-                st.info("현장을 먼저 등록해주세요.")
-            else:
-                site_dict = dict(zip(sites["site_name"], sites["id"]))
-                sel_site = st.selectbox("현장 선택", list(site_dict.keys()))
-                with st.form("invoice_form", clear_on_submit=True):
-                    col1, col2, col3 = st.columns(3)
-                    inv_type = col1.selectbox("기성종류", CLAIM_TYPES)
-                    inv_date_v = col2.date_input("발행일")
-                    inv_amount_v = col3.number_input("발행 금액(원)", min_value=0, step=100000)
-                    if st.form_submit_button("📄 계산서 발행 등록"):
-                        with engine.connect() as conn:
+                        for pdate, pamt in payment_events:
+                            pdate_final = pdate or cur_due or date.today()
+                            conn.execute(text("INSERT INTO payments (claim_id, payment_date, payment_amount) VALUES (:cid,:pd,:pa)"),
+                                         {"cid": claim_id, "pd": pdate_final.isoformat(), "pa": pamt})
+                        if status == "완납" and payment_events:
+                            last_pay_date = max(p[0] for p in payment_events if p[0]) if any(p[0] for p in payment_events) else cur_due
+                            delay_days = 0
+                            event_type = "입금완료(정상)"
+                            if orig_due and last_pay_date and last_pay_date > orig_due:
+                                delay_days = (last_pay_date - orig_due).days
+                                event_type = "입금완료(지연)"
                             conn.execute(text("""
-                                INSERT INTO tax_invoices (site_id, claim_type, issue_date, invoice_amount)
-                                VALUES (:sid, :ctype, :idate, :amt)
-                            """), {"sid": site_dict[sel_site], "ctype": inv_type, "idate": str(inv_date_v), "amt": inv_amount_v})
-                            conn.commit()
-                        st.success("계산서 발행 내역이 등록되었습니다. (공사현황에 자동 반영됨)")
-                        st.rerun()
+                                INSERT INTO claim_delay_history (claim_id, event_type, payment_date, delay_days, reason)
+                                VALUES (:cid, :etype, :pd, :dd, '엑셀 이력 가져오기')
+                            """), {"cid": claim_id, "etype": event_type, "pd": last_pay_date.isoformat() if last_pay_date else None, "dd": delay_days})
+                    conn.commit()
+                st.success(f"✅ 완료! 청구 {n_claims}건 반영 (기존 데이터는 전부 새 데이터로 갈음됨)")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ 처리 오류: {e}")
 
-                st.divider()
+        st.divider()
+
+        # ---------------- 현장별 미수관리 업로드 ----------------
+        st.markdown("### 📂 현장별 미수관리 업로드 (현장별 미수현황·완불현장·계약현황)")
+        recv_file = st.file_uploader("현장별 미수관리 엑셀(.xlsx) 업로드", type=["xlsx"], key="recv_upload")
+
+        if recv_file is not None and st.button("🚀 현장별 미수관리 데이터로 전체 갱신", use_container_width=True):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(recv_file, data_only=True)
+                if "미수내역" not in wb.sheetnames:
+                    st.error("'미수내역' 시트를 찾지 못했습니다.")
+                    st.stop()
+                ws = wb["미수내역"]
+
+                def hdr_row_idx():
+                    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True)):
+                        if any(v == "공사명" for v in row):
+                            return i + 1
+                    return 4
+
+                start_row = hdr_row_idx() + 1
+                rows = list(ws.iter_rows(min_row=start_row, values_only=True))
+
+                def to_date_s(v):
+                    d = safe_date(v)
+                    return d.isoformat() if d else None
+
+                def is_blank(r):
+                    return all(v is None for v in r)
+
                 with engine.connect() as conn:
-                    inv_list = pd.read_sql("""
-                        SELECT i.id, s.site_name, i.claim_type, i.issue_date, i.invoice_amount
-                        FROM tax_invoices i JOIN sites s ON i.site_id = s.id
-                        ORDER BY i.issue_date DESC;
-                    """, conn)
-                render_html_table(inv_list, money_cols=["invoice_amount"], left_cols=["site_name"])
-                del_id = st.number_input("삭제할 계산서 ID", min_value=1, step=1)
-                if st.button("❌ 계산서 삭제"):
-                    with engine.connect() as conn:
-                        conn.execute(text("DELETE FROM tax_invoices WHERE id=:id;"), {"id": del_id})
-                        conn.commit()
-                    st.success("삭제 완료!")
-                    st.rerun()
+                    for t in ["site_receivable_details", "site_receivables"]:
+                        conn.execute(text(f"DELETE FROM {t};"))
+                    conn.commit()
 
-        # ---------------- 삭제/병합 ----------------
-        elif action == "🛠️ 삭제/병합":
-            mod_type = st.radio("항목 선택", ["현장 삭제", "현장 병합", "청구 삭제", "입금내역 삭제", "⚠️ 전체 데이터 초기화"], horizontal=True)
-            with engine.connect() as conn:
-                if mod_type == "⚠️ 전체 데이터 초기화":
-                    st.error("모든 현장/청구/입금/계산서/이력 데이터가 삭제됩니다. 되돌릴 수 없습니다.")
-                    confirm = st.checkbox("정말로 전체 삭제하겠습니다")
-                    if st.button("🗑️ 전체 초기화 실행", disabled=not confirm):
-                        for t in ["claim_delay_history", "payments", "tax_invoices", "claims", "sites"]:
-                            conn.execute(text(f"DELETE FROM {t};"))
-                        conn.commit()
-                        st.success("전체 초기화 완료!")
-                        st.rerun()
+                    n_sites = 0
+                    i = 0
+                    while i < len(rows):
+                        r = rows[i]
+                        if r[7]:  # 공사명
+                            n_sites += 1
+                            c_flag = r[2]
+                            is_active = 1
+                            status_label = "활성"
+                            if isinstance(c_flag, str) and c_flag.strip() in CLOSED_STATUS_WORDS:
+                                is_active = 0
+                                status_label = c_flag.strip()
 
-                elif mod_type == "현장 삭제":
-                    sites = pd.read_sql("SELECT id, site_name, company_name, manager FROM sites;", conn)
-                    st.dataframe(sites, use_container_width=True)
-                    del_id = st.number_input("삭제할 현장 ID", min_value=1, step=1)
-                    if st.button("❌ 현장 삭제 (관련 청구/입금/계산서 함께 삭제)"):
-                        conn.execute(text("DELETE FROM sites WHERE id=:id;"), {"id": del_id})
-                        conn.commit()
-                        st.success("삭제 완료!")
-                        st.rerun()
+                            contract_date = to_date_s(r[11])
+                            ym = to_date_s(r[10])
+                            if not contract_date:
+                                contract_date = ym
 
-                elif mod_type == "현장 병합":
-                    sites = pd.read_sql("SELECT id, site_name FROM sites ORDER BY site_name;", conn)
-                    st.dataframe(sites, use_container_width=True)
-                    col1, col2 = st.columns(2)
-                    from_id = col1.number_input("병합될(없어질) 현장 ID", min_value=1, step=1, key="mfrom")
-                    to_id = col2.number_input("남을 현장 ID", min_value=1, step=1, key="mto")
-                    if st.button("🔀 병합 실행"):
-                        conn.execute(text("UPDATE claims SET site_id=:to WHERE site_id=:frm;"), {"to": to_id, "frm": from_id})
-                        conn.execute(text("UPDATE payments SET site_id=:to WHERE site_id=:frm;"), {"to": to_id, "frm": from_id})
-                        conn.execute(text("UPDATE tax_invoices SET site_id=:to WHERE site_id=:frm;"), {"to": to_id, "frm": from_id})
-                        conn.execute(text("DELETE FROM sites WHERE id=:frm;"), {"frm": from_id})
-                        conn.commit()
-                        st.success("병합 완료!")
-                        st.rerun()
+                            res = conn.execute(text("""
+                                INSERT INTO site_receivables
+                                (site_name, company_name, manager, branch, contract_code, contract_date, start_date,
+                                 completion_date, contract_yearmonth, contract_amount, change_amount, total_paid,
+                                 unpaid_balance, progress_rate, invoice_progress_rate, invoice_issue_rate, is_active, status_label)
+                                VALUES (:sn,:cn,:mg,:br,:cc,:cd,:sd,:ed,:ym,:ca,:cha,:tp,:ub,:pr,:ipr,:iir,:ia,:sl)
+                            """), {
+                                "sn": r[7], "cn": r[8] or "", "mg": r[24] or "", "br": r[4] or "",
+                                "cc": r[3] or "", "cd": contract_date, "sd": to_date_s(r[12]), "ed": to_date_s(r[13]),
+                                "ym": ym,
+                                "ca": parse_amount(r[16]) * 1000, "cha": parse_amount(r[15]) * 1000,
+                                "tp": parse_amount(r[17]) * 1000, "ub": parse_amount(r[18]) * 1000,
+                                "pr": float(r[19]) if isinstance(r[19], (int, float)) else 0,
+                                "ipr": float(r[20]) if isinstance(r[20], (int, float)) else 0,
+                                "iir": float(r[21]) if isinstance(r[21], (int, float)) else 0,
+                                "ia": is_active, "sl": status_label,
+                            })
+                            site_id = res.lastrowid
 
-                elif mod_type == "청구 삭제":
-                    claims = pd.read_sql("SELECT c.id, s.site_name, c.claim_type, c.claim_amount FROM claims c JOIN sites s ON c.site_id=s.id;", conn)
-                    render_html_table(claims, money_cols=["claim_amount"], left_cols=["site_name"])
-                    del_id = st.number_input("삭제할 청구 ID", min_value=1, step=1)
-                    if st.button("❌ 청구 삭제"):
-                        conn.execute(text("DELETE FROM claims WHERE id=:id;"), {"id": del_id})
-                        conn.commit()
-                        st.success("삭제 완료!")
-                        st.rerun()
-
-                elif mod_type == "입금내역 삭제":
-                    payments = pd.read_sql("SELECT p.id, s.site_name, p.payment_date, p.payment_amount FROM payments p JOIN sites s ON p.site_id=s.id;", conn)
-                    render_html_table(payments, money_cols=["payment_amount"], left_cols=["site_name"])
-                    del_id = st.number_input("삭제할 입금 ID", min_value=1, step=1)
-                    if st.button("❌ 입금내역 삭제"):
-                        conn.execute(text("DELETE FROM payments WHERE id=:id;"), {"id": del_id})
-                        conn.commit()
-                        st.success("삭제 완료!")
-                        st.rerun()
+                            j = i + 1
+                            while j < len(rows) and not is_blank(rows[j]) and rows[j][7] is None:
+                                d = rows[j]
+                                # 변경계약: col11=날짜, col12=문서종류, col15=금액
+                                if isinstance(d[11], datetime) and isinstance(d[15], (int, float)) and d[15]:
+                                    conn.execute(text("""
+                                        INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
+                                        VALUES (:sid,'변경계약',:dt,:amt,:note)
+                                    """), {"sid": site_id, "dt": to_date_s(d[11]), "amt": int(d[15]) * 1000, "note": d[12] or ""})
+                                # 계산서: col28=발행일, col29=발행액
+                                if isinstance(d[28], datetime) and isinstance(d[29], (int, float)) and d[29]:
+                                    conn.execute(text("""
+                                        INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
+                                        VALUES (:sid,'계산서',:dt,:amt,'')
+                                    """), {"sid": site_id, "dt": to_date_s(d[28]), "amt": int(d[29]) * 1000})
+                                # 입금: col31=입금일, col32=입금액
+                                if isinstance(d[31], datetime) and isinstance(d[32], (int, float)) and d[32]:
+                                    conn.execute(text("""
+                                        INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
+                                        VALUES (:sid,'입금',:dt,:amt,'')
+                                    """), {"sid": site_id, "dt": to_date_s(d[31]), "amt": int(d[32]) * 1000})
+                                j += 1
+                            i = j
+                        else:
+                            i += 1
+                    conn.commit()
+                st.success(f"✅ 완료! 현장 {n_sites}개 반영 (기존 데이터는 전부 새 데이터로 갈음됨)")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ 처리 오류: {e}")
+                
