@@ -12,7 +12,6 @@ st.title("🏗️ 건설 현장 정산 & 지연 관리 시스템")
 ADMIN_PASSWORD = "chdan1576**"
 
 CLAIM_TYPES = ["선급금", "기성금", "중도금", "잔금", "추가금", "정산금", "AS", "시공부자재"]
-CLOSED_STATUS_WORDS = ("완불", "계약파기", "완료", "감액종결")
 
 engine = create_engine("sqlite:///construction_v6.db")
 
@@ -273,7 +272,6 @@ with tab_receivable:
         st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '현장별 미수관리' 엑셀을 업로드해주세요.")
     else:
         active_df = sr_df[sr_df["is_active"] == 1].copy()
-        closed_df = sr_df[sr_df["is_active"] == 0].copy()
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("활성 현장 수", f"{len(active_df)}개")
@@ -282,50 +280,54 @@ with tab_receivable:
         c4.metric("총 미수잔액", f"{active_df['unpaid_balance'].sum():,} 원")
 
         st.divider()
+        st.caption("👉 아래 표에서 현장 행을 클릭하면 그 밑에 계산서·입금·변경계약 세부내역이 뜹니다.")
+
         disp = active_df.rename(columns={
             "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
-            "start_date": "착공일", "completion_date": "준공일", "contract_amount": "총계약금액",
-            "change_amount": "변경계약금액", "total_paid": "총입금액", "unpaid_balance": "미수잔액",
+            "contract_amount": "총계약금액", "total_paid": "총입금액", "unpaid_balance": "미수잔액",
             "manager": "담당자",
         })
         disp["공정율(%)"] = (active_df["progress_rate"] * 100).round(0).astype(int)
-        disp["기성율(%)"] = (active_df["invoice_progress_rate"] * 100).round(0).astype(int)
-        disp["계산서발행율(%)"] = (active_df["invoice_issue_rate"] * 100).round(0).astype(int)
-        show_cols = ["현장명", "업체명", "계약일", "착공일", "준공일", "총계약금액", "변경계약금액",
-                     "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "계산서발행율(%)", "담당자"]
-        render_html_table(disp[show_cols], money_cols=["총계약금액", "변경계약금액", "총입금액", "미수잔액"])
+        show_cols = ["현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "담당자"]
+        show_df = disp[show_cols].reset_index(drop=True)
 
-        st.divider()
-        st.markdown("#### 🔍 현장 상세 (계산서·입금·변경계약 내역)")
-        pick = st.selectbox("현장 선택", active_df["site_name"].tolist())
-        pick_id = int(active_df[active_df["site_name"] == pick]["id"].values[0])
-        with engine.connect() as conn:
-            detail_df = pd.read_sql(
-                "SELECT detail_type, detail_date, amount, note FROM site_receivable_details WHERE site_receivable_id=:sid ORDER BY detail_date;",
-                conn, params={"sid": pick_id}
+        sel_site = None
+        try:
+            event = st.dataframe(
+                show_df, use_container_width=True, hide_index=True,
+                on_select="rerun", selection_mode="single-row", key="recv_table",
+                column_config={
+                    "총계약금액": st.column_config.NumberColumn(),
+                    "총입금액": st.column_config.NumberColumn(),
+                    "미수잔액": st.column_config.NumberColumn(),
+                },
             )
-        if detail_df.empty:
-            st.caption("세부내역이 없습니다.")
-        else:
-            for label in ["변경계약", "계산서", "입금"]:
-                sub = detail_df[detail_df["detail_type"] == label]
-                if sub.empty:
-                    continue
-                st.markdown(f"**{label} 내역**")
-                sub_disp = sub.rename(columns={"detail_date": "일자", "amount": "금액", "note": "비고"}).drop(columns=["detail_type"])
-                render_html_table(sub_disp, money_cols=["금액"], left_cols=[])
+            if event and event.selection and event.selection.get("rows"):
+                sel_site = show_df.iloc[event.selection["rows"][0]]["현장명"]
+        except Exception:
+            st.dataframe(show_df, use_container_width=True, hide_index=True)
+            sel_site = st.selectbox("현장 선택 (상세 보기)", show_df["현장명"].tolist())
 
-        st.divider()
-        st.markdown(f"#### ✅ 완불현장 리스트 ({len(closed_df)}개)")
-        if closed_df.empty:
-            st.caption("완불현장이 없습니다.")
-        else:
-            closed_disp = closed_df.rename(columns={
-                "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
-                "contract_amount": "총계약금액", "manager": "담당자", "status_label": "상태",
-            })
-            render_html_table(closed_disp[["현장명", "업체명", "계약일", "총계약금액", "담당자", "상태"]],
-                               money_cols=["총계약금액"])
+        if sel_site:
+            st.divider()
+            row = active_df[active_df["site_name"] == sel_site].iloc[0]
+            st.markdown(f"#### 🔍 {sel_site} 상세")
+            i1, i2, i3, i4 = st.columns(4)
+            i1.metric("착공일", row["start_date"] or "-")
+            i2.metric("준공일", row["completion_date"] or "-")
+            i3.metric("변경계약금액", f"{row['change_amount']:,} 원")
+            i4.metric("기성율", f"{round(row['invoice_progress_rate']*100)}%")
+
+            with engine.connect() as conn:
+                detail_df = pd.read_sql(
+                    "SELECT detail_type as 구분, detail_date as 일자, amount as 금액, note as 비고 "
+                    "FROM site_receivable_details WHERE site_receivable_id=:sid ORDER BY detail_date;",
+                    conn, params={"sid": int(row["id"])}
+                )
+            if detail_df.empty:
+                st.caption("세부내역이 없습니다.")
+            else:
+                render_html_table(detail_df, money_cols=["금액"], left_cols=[])
 
 # ==========================================================================
 # TAB: 기성청구현황  (일일수금관리=이력 엑셀 기준)
@@ -785,7 +787,7 @@ with tab_admin:
                             c_flag = r[2]
                             is_active = 1
                             status_label = "활성"
-                            if isinstance(c_flag, str) and c_flag.strip() in CLOSED_STATUS_WORDS:
+                            if isinstance(c_flag, str) and c_flag.strip() != "":
                                 is_active = 0
                                 status_label = c_flag.strip()
 
@@ -843,4 +845,3 @@ with tab_admin:
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ 처리 오류: {e}")
-                
