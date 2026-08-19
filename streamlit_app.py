@@ -312,7 +312,27 @@ with tab_receivable:
             if detail_df.empty:
                 st.caption("세부내역이 없습니다.")
             else:
-                render_html_table(detail_df, money_cols=["금액"], left_cols=[])
+                inv_df = detail_df[detail_df["구분"] == "계산서"].drop(columns=["구분", "비고"]).reset_index(drop=True)
+                pay_df = detail_df[detail_df["구분"] == "입금"].drop(columns=["구분", "비고"]).reset_index(drop=True)
+                change_df = detail_df[detail_df["구분"] == "변경계약"].drop(columns=["구분"]).reset_index(drop=True)
+
+                col_left, col_right = st.columns(2)
+                with col_left:
+                    st.markdown("**📄 계산서 발행 내역**")
+                    if inv_df.empty:
+                        st.caption("없음")
+                    else:
+                        render_html_table(inv_df, money_cols=["금액"], left_cols=[])
+                with col_right:
+                    st.markdown("**💰 입금 내역**")
+                    if pay_df.empty:
+                        st.caption("없음")
+                    else:
+                        render_html_table(pay_df, money_cols=["금액"], left_cols=[])
+
+                if not change_df.empty:
+                    st.markdown("**📝 변경계약 내역**")
+                    render_html_table(change_df, money_cols=["금액"], left_cols=[])
 
 # ==========================================================================
 # TAB: 기성청구현황  (일일수금관리=이력 엑셀 기준)
