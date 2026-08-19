@@ -280,7 +280,6 @@ with tab_receivable:
         c4.metric("총 미수잔액", f"{active_df['unpaid_balance'].sum():,} 원")
 
         st.divider()
-        st.caption("👉 아래 표에서 현장 행을 클릭하면 그 밑에 계산서·입금·변경계약 세부내역이 뜹니다.")
 
         disp = active_df.rename(columns={
             "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
@@ -288,35 +287,21 @@ with tab_receivable:
             "manager": "담당자",
         })
         disp["공정율(%)"] = (active_df["progress_rate"] * 100).round(0).astype(int)
-        show_cols = ["현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "담당자"]
+        disp["기성율(%)"] = (active_df["invoice_progress_rate"] * 100).round(0).astype(int)
+        show_cols = ["현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
         show_df = disp[show_cols].reset_index(drop=True)
+        render_html_table(show_df, money_cols=["총계약금액", "총입금액", "미수잔액"])
 
-        sel_site = None
-        try:
-            event = st.dataframe(
-                show_df, use_container_width=True, hide_index=True,
-                on_select="rerun", selection_mode="single-row", key="recv_table",
-                column_config={
-                    "총계약금액": st.column_config.NumberColumn(),
-                    "총입금액": st.column_config.NumberColumn(),
-                    "미수잔액": st.column_config.NumberColumn(),
-                },
-            )
-            if event and event.selection and event.selection.get("rows"):
-                sel_site = show_df.iloc[event.selection["rows"][0]]["현장명"]
-        except Exception:
-            st.dataframe(show_df, use_container_width=True, hide_index=True)
-            sel_site = st.selectbox("현장 선택 (상세 보기)", show_df["현장명"].tolist())
+        st.divider()
+        st.markdown("#### 🔍 현장 상세 (계산서·입금·변경계약 내역)")
+        sel_site = st.selectbox("현장 선택", show_df["현장명"].tolist())
 
         if sel_site:
-            st.divider()
             row = active_df[active_df["site_name"] == sel_site].iloc[0]
-            st.markdown(f"#### 🔍 {sel_site} 상세")
-            i1, i2, i3, i4 = st.columns(4)
+            i1, i2, i3 = st.columns(3)
             i1.metric("착공일", row["start_date"] or "-")
             i2.metric("준공일", row["completion_date"] or "-")
             i3.metric("변경계약금액", f"{row['change_amount']:,} 원")
-            i4.metric("기성율", f"{round(row['invoice_progress_rate']*100)}%")
 
             with engine.connect() as conn:
                 detail_df = pd.read_sql(
@@ -682,10 +667,9 @@ with tab_admin:
 
                         payment_events = []
                         for _, r in grp.iterrows():
-                            pf = str(r.get("paid_flag", "") or "").strip().upper()
                             pa = parse_amount(r.get("paid_amount", 0))
-                            if pf == "Y" and pa > 0:
-                                pdate = safe_date(r.get("payment_date_raw")) or safe_date(r.get("current_due_date"))
+                            pdate = safe_date(r.get("payment_date_raw"))
+                            if pdate and pa > 0:
                                 payment_events.append((pdate, pa))
                         total_paid = sum(a for _, a in payment_events)
 
