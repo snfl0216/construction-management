@@ -280,6 +280,7 @@ with tab_receivable:
         c4.metric("총 미수잔액", f"{active_df['unpaid_balance'].sum():,} 원")
 
         st.divider()
+        st.caption("👉 표에서 현장 행을 클릭하면 아래에 상세내역이 뜹니다.")
 
         disp = active_df.rename(columns={
             "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
@@ -290,11 +291,23 @@ with tab_receivable:
         disp["기성율(%)"] = (active_df["invoice_progress_rate"] * 100).round(0).astype(int)
         show_cols = ["현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
         show_df = disp[show_cols].reset_index(drop=True)
-        render_html_table(show_df, money_cols=["총계약금액", "총입금액", "미수잔액"])
 
-        st.divider()
-        st.markdown("#### 🔍 현장 상세 (계산서·입금·변경계약 내역)")
-        sel_site = st.selectbox("현장 선택", show_df["현장명"].tolist())
+        table_height = 38 + 35 * len(show_df) + 3  # 헤더 + 행 개수만큼 계산해서 스크롤 없이 다 펼쳐지게
+
+        sel_site = None
+        try:
+            event = st.dataframe(
+                show_df, use_container_width=True, hide_index=True, height=table_height,
+                on_select="rerun", selection_mode="single-row", key="recv_table",
+            )
+            if event and event.selection and event.selection.get("rows"):
+                sel_site = show_df.iloc[event.selection["rows"][0]]["현장명"]
+        except Exception:
+            st.dataframe(show_df, use_container_width=True, hide_index=True, height=table_height)
+            sel_site = st.selectbox("현장 선택 (상세 보기)", show_df["현장명"].tolist())
+
+        if sel_site is None:
+            st.caption("표에서 현장을 클릭하면 아래 상세내역이 표시됩니다.")
 
         if sel_site:
             row = active_df[active_df["site_name"] == sel_site].iloc[0]
