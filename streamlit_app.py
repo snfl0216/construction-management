@@ -59,6 +59,8 @@ with engine.connect() as conn:
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS site_receivables (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            no_number INTEGER,
+            division TEXT,
             site_name TEXT,
             company_name TEXT,
             manager TEXT,
@@ -79,6 +81,12 @@ with engine.connect() as conn:
             status_label TEXT
         );
     """))
+    for col_def in ["no_number INTEGER", "division TEXT"]:
+        try:
+            conn.execute(text(f"ALTER TABLE site_receivables ADD COLUMN {col_def};"))
+            conn.commit()
+        except Exception:
+            pass
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS site_receivable_details (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,7 +169,7 @@ def render_html_table(df, money_cols=None, left_cols=None):
     for col in d.columns:
         align = "right" if col in money_cols else ("left" if col in left_cols else "center")
         html += (f"<th style='padding:6px 10px;border-bottom:2px solid #ddd;background:#fafafa;"
-                  f"text-align:{align};white-space:nowrap;'>{col}</th>")
+                  f"text-align:{align} !important;white-space:nowrap;'>{col}</th>")
     html += "</tr></thead><tbody>"
     for _, row in d.iterrows():
         html += "<tr>"
@@ -177,7 +185,7 @@ def render_html_table(df, money_cols=None, left_cols=None):
                 val_disp = "" if pd.isna(val) else str(val)
                 align = "left" if col in left_cols else "center"
             html += (f"<td style='padding:5px 10px;border-bottom:1px solid #eee;"
-                      f"text-align:{align};white-space:nowrap;'>{val_disp}</td>")
+                      f"text-align:{align} !important;white-space:nowrap;'>{val_disp}</td>")
         html += "</tr>"
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
@@ -280,16 +288,43 @@ with tab_receivable:
         c4.metric("총 미수잔액", f"{active_df['unpaid_balance'].sum():,} 원")
 
         st.divider()
+        st.markdown("#### 📌 구분(ENC/필로브/대리점 등)별 합계")
+        div_summary = active_df.groupby(active_df["division"].replace("", "미분류")).agg(
+            현장수=("id", "count"),
+            총계약금액=("contract_amount", "sum"),
+            총입금액=("total_paid", "sum"),
+            미수잔액=("unpaid_balance", "sum"),
+        ).reset_index().rename(columns={"division": "구분"})
+        render_html_table(div_summary, money_cols=["총계약금액", "총입금액", "미수잔액"], left_cols=[])
 
-        disp = active_df.rename(columns={
+        st.divider()
+        st.markdown("#### 🔍 필터")
+        f1, f2 = st.columns(2)
+        company_options = ["전체"] + sorted(active_df["company_name"].dropna().unique().tolist())
+        company_filter = f1.selectbox("업체별", company_options)
+        progress_options = ["전체", "0~30%", "30~60%", "60~90%", "90~100%"]
+        progress_filter = f2.selectbox("공정율별", progress_options)
+
+        filtered_df = active_df.copy()
+        if company_filter != "전체":
+            filtered_df = filtered_df[filtered_df["company_name"] == company_filter]
+        if progress_filter != "전체":
+            lo, hi = {"0~30%": (0, 30), "30~60%": (30, 60), "60~90%": (60, 90), "90~100%": (90, 100)}[progress_filter]
+            pr_pct = filtered_df["progress_rate"] * 100
+            filtered_df = filtered_df[(pr_pct >= lo) & (pr_pct <= hi)]
+
+        st.caption(f"{len(filtered_df)}개 현장 표시 중")
+
+        disp = filtered_df.rename(columns={
+            "no_number": "번호", "division": "구분",
             "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
             "contract_amount": "총계약금액", "total_paid": "총입금액", "unpaid_balance": "미수잔액",
             "manager": "담당자",
         })
-        disp["공정율(%)"] = (active_df["progress_rate"] * 100).round(0).astype(int)
-        disp["기성율(%)"] = (active_df["invoice_progress_rate"] * 100).round(0).astype(int)
-        show_cols = ["현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
-        show_df = disp[show_cols].reset_index(drop=True)
+        disp["공정율(%)"] = (filtered_df["progress_rate"] * 100).round(0).astype(int)
+        disp["기성율(%)"] = (filtered_df["invoice_progress_rate"] * 100).round(0).astype(int)
+        show_cols = ["번호", "구분", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
+        show_df = disp[show_cols].sort_values("번호").reset_index(drop=True)
         render_html_table(show_df, money_cols=["총계약금액", "총입금액", "미수잔액"])
 
         st.divider()
@@ -822,11 +857,13 @@ with tab_admin:
 
                             res = conn.execute(text("""
                                 INSERT INTO site_receivables
-                                (site_name, company_name, manager, branch, contract_code, contract_date, start_date,
+                                (no_number, division, site_name, company_name, manager, branch, contract_code, contract_date, start_date,
                                  completion_date, contract_yearmonth, contract_amount, change_amount, total_paid,
                                  unpaid_balance, progress_rate, invoice_progress_rate, invoice_issue_rate, is_active, status_label)
-                                VALUES (:sn,:cn,:mg,:br,:cc,:cd,:sd,:ed,:ym,:ca,:cha,:tp,:ub,:pr,:ipr,:iir,:ia,:sl)
+                                VALUES (:no,:div,:sn,:cn,:mg,:br,:cc,:cd,:sd,:ed,:ym,:ca,:cha,:tp,:ub,:pr,:ipr,:iir,:ia,:sl)
                             """), {
+                                "no": int(r[6]) if isinstance(r[6], (int, float)) else None,
+                                "div": r[5] or "",
                                 "sn": r[7], "cn": r[8] or "", "mg": r[24] or "", "br": r[4] or "",
                                 "cc": r[3] or "", "cd": contract_date, "sd": to_date_s(r[12]), "ed": to_date_s(r[13]),
                                 "ym": ym,
