@@ -340,7 +340,35 @@ with tab_receivable:
             .sort_values(["_sortdiv", "_sortno"])[cols]
             .reset_index(drop=True)
         )
-        render_html_table(show_df, money_cols=["총계약금액", "총입금액", "미수잔액"])
+
+        # 구분(ENC/필로브/대리점)이 바뀔 때마다 그 구분의 소계 행을 표 안에 끼워넣는다
+        rows_with_subtotal = []
+        prev_div = None
+        group_rows = []
+
+        def flush_subtotal(div_name, group):
+            if not group:
+                return
+            gdf = pd.DataFrame(group)
+            subtotal = {c: "" for c in cols}
+            subtotal["현장명"] = f"▶ {div_name} 소계"
+            subtotal["총계약금액"] = gdf["총계약금액"].sum()
+            subtotal["총입금액"] = gdf["총입금액"].sum()
+            subtotal["미수잔액"] = gdf["미수잔액"].sum()
+            rows_with_subtotal.append(subtotal)
+
+        for _, r in show_df.iterrows():
+            cur_div = r["구분"]
+            if prev_div is not None and cur_div != prev_div:
+                flush_subtotal(prev_div, group_rows)
+                group_rows = []
+            group_rows.append(r[cols].to_dict())
+            rows_with_subtotal.append(r[cols].to_dict())
+            prev_div = cur_div
+        flush_subtotal(prev_div, group_rows)
+
+        show_df_final = pd.DataFrame(rows_with_subtotal)[cols]
+        render_html_table(show_df_final, money_cols=["총계약금액", "총입금액", "미수잔액"])
 
         st.markdown("## 🔍 현장 상세 내역")
         sel_site = st.selectbox("현장 선택", show_df["현장명"].tolist())
