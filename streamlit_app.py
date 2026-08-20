@@ -288,47 +288,53 @@ with tab_receivable:
         c4.metric("총 미수잔액", f"{active_df['unpaid_balance'].sum():,} 원")
 
         st.divider()
-        st.markdown("#### 📌 구분(ENC/필로브/대리점 등)별 합계")
-        div_summary = active_df.groupby(active_df["division"].replace("", "미분류")).agg(
-            현장수=("id", "count"),
-            총계약금액=("contract_amount", "sum"),
-            총입금액=("total_paid", "sum"),
-            미수잔액=("unpaid_balance", "sum"),
-        ).reset_index().rename(columns={"division": "구분"})
-        render_html_table(div_summary, money_cols=["총계약금액", "총입금액", "미수잔액"], left_cols=[])
-
-        st.divider()
         st.markdown("#### 🔍 필터")
-        f1, f2 = st.columns(2)
+        f1, f2, f3 = st.columns(3)
         company_options = ["전체"] + sorted(active_df["company_name"].dropna().unique().tolist())
         company_filter = f1.selectbox("업체별", company_options)
-        progress_options = ["전체", "0~30%", "30~60%", "60~90%", "90~100%"]
-        progress_filter = f2.selectbox("공정율별", progress_options)
+        manager_options = ["전체"] + sorted(active_df["manager"].dropna().unique().tolist())
+        manager_filter = f2.selectbox("담당자별", manager_options)
+        year_series = pd.to_datetime(active_df["contract_date"], errors="coerce").dt.year.dropna().astype(int)
+        year_options = ["전체"] + sorted(year_series.unique().tolist(), reverse=True)
+        year_filter = f3.selectbox("계약일(연도)별", year_options)
 
         filtered_df = active_df.copy()
         if company_filter != "전체":
             filtered_df = filtered_df[filtered_df["company_name"] == company_filter]
-        if progress_filter != "전체":
-            lo, hi = {"0~30%": (0, 30), "30~60%": (30, 60), "60~90%": (60, 90), "90~100%": (90, 100)}[progress_filter]
-            pr_pct = filtered_df["progress_rate"] * 100
-            filtered_df = filtered_df[(pr_pct >= lo) & (pr_pct <= hi)]
+        if manager_filter != "전체":
+            filtered_df = filtered_df[filtered_df["manager"] == manager_filter]
+        if year_filter != "전체":
+            filtered_df = filtered_df[pd.to_datetime(filtered_df["contract_date"], errors="coerce").dt.year == year_filter]
 
         st.caption(f"{len(filtered_df)}개 현장 표시 중")
 
-        disp = filtered_df.rename(columns={
-            "no_number": "번호", "division": "구분",
-            "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
-            "contract_amount": "총계약금액", "total_paid": "총입금액", "unpaid_balance": "미수잔액",
-            "manager": "담당자",
-        })
-        disp["공정율(%)"] = (filtered_df["progress_rate"] * 100).round(0).astype(int)
-        disp["기성율(%)"] = (filtered_df["invoice_progress_rate"] * 100).round(0).astype(int)
-        show_cols = ["번호", "구분", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
-        show_df = disp[show_cols].sort_values("번호").reset_index(drop=True)
-        render_html_table(show_df, money_cols=["총계약금액", "총입금액", "미수잔액"])
+        def build_show_df(df):
+            disp = df.rename(columns={
+                "division": "구분", "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
+                "contract_amount": "총계약금액", "total_paid": "총입금액", "unpaid_balance": "미수잔액",
+                "manager": "담당자",
+            })
+            disp["번호"] = df["no_number"].apply(lambda x: str(int(x)) if pd.notna(x) else "-")
+            disp["공정율(%)"] = (df["progress_rate"] * 100).round(0).astype(int)
+            disp["기성율(%)"] = (df["invoice_progress_rate"] * 100).round(0).astype(int)
+            cols = ["번호", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
+            return disp[cols].reset_index(drop=True)
 
+        divisions = filtered_df["division"].replace("", "미분류").fillna("미분류")
         st.divider()
-        st.divider()
+        for div_name in sorted(divisions.unique().tolist()):
+            div_df = filtered_df[divisions == div_name]
+            if div_df.empty:
+                continue
+            st.markdown(f"### 🏢 {div_name} ({len(div_df)}개 현장)")
+            dc1, dc2, dc3 = st.columns(3)
+            dc1.metric(f"{div_name} 계약금액 합계", f"{div_df['contract_amount'].sum():,} 원")
+            dc2.metric(f"{div_name} 입금액 합계", f"{div_df['total_paid'].sum():,} 원")
+            dc3.metric(f"{div_name} 미수잔액 합계", f"{div_df['unpaid_balance'].sum():,} 원")
+            show_df = build_show_df(div_df.sort_values("no_number"))
+            render_html_table(show_df, money_cols=["총계약금액", "총입금액", "미수잔액"])
+            st.divider()
+
         st.markdown("## 🔍 현장 상세 내역")
         sel_site = st.selectbox("현장 선택", show_df["현장명"].tolist())
         st.write("")
