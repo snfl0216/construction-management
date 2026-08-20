@@ -331,7 +331,15 @@ with tab_receivable:
         disp["공정율(%)"] = (filtered_df["progress_rate"] * 100).round(0).astype(int)
         disp["기성율(%)"] = (filtered_df["invoice_progress_rate"] * 100).round(0).astype(int)
         cols = ["번호", "구분", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
-        show_df = disp.assign(_sortno=filtered_df["no_number"]).sort_values("_sortno")[cols].reset_index(drop=True)
+        DIVISION_ORDER = {"ENC": 0, "필로브": 1, "대리점": 2}
+        show_df = (
+            disp.assign(
+                _sortno=filtered_df["no_number"],
+                _sortdiv=disp["구분"].map(lambda x: DIVISION_ORDER.get(x, 99)),
+            )
+            .sort_values(["_sortdiv", "_sortno"])[cols]
+            .reset_index(drop=True)
+        )
         render_html_table(show_df, money_cols=["총계약금액", "총입금액", "미수잔액"])
 
         st.markdown("## 🔍 현장 상세 내역")
