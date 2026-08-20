@@ -291,6 +291,7 @@ with tab_receivable:
         disp["기성율(%)"] = (active_df["invoice_progress_rate"] * 100).round(0).astype(int)
         show_cols = ["현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
         show_df = disp[show_cols].reset_index(drop=True)
+        show_df = fmt_money_cols(show_df, ["총계약금액", "총입금액", "미수잔액"])
 
         table_height = 38 + 35 * len(show_df) + 3  # 헤더 + 행 개수만큼 계산해서 스크롤 없이 다 펼쳐지게
 
@@ -311,10 +312,17 @@ with tab_receivable:
 
         if sel_site:
             row = active_df[active_df["site_name"] == sel_site].iloc[0]
-            i1, i2, i3 = st.columns(3)
-            i1.metric("착공일", row["start_date"] or "-")
-            i2.metric("준공일", row["completion_date"] or "-")
-            i3.metric("변경계약금액", f"{row['change_amount']:,} 원")
+
+            summary_df = pd.DataFrame([{
+                "현장명": row["site_name"], "업체명": row["company_name"],
+                "계약일": row["contract_date"] or "-", "준공일": row["completion_date"] or "-",
+                "착공일": row["start_date"] or "-",
+                "총계약금(변경포함)": row["contract_amount"] + row["change_amount"],
+                "변경계약": row["change_amount"], "미수잔액": row["unpaid_balance"],
+                "공정율(%)": round(row["progress_rate"] * 100), "기성율(%)": round(row["invoice_progress_rate"] * 100),
+                "담당자": row["manager"],
+            }])
+            render_html_table(summary_df, money_cols=["총계약금(변경포함)", "변경계약", "미수잔액"])
 
             with engine.connect() as conn:
                 detail_df = pd.read_sql(
@@ -329,19 +337,24 @@ with tab_receivable:
                 pay_df = detail_df[detail_df["구분"] == "입금"].drop(columns=["구분", "비고"]).reset_index(drop=True)
                 change_df = detail_df[detail_df["구분"] == "변경계약"].drop(columns=["구분"]).reset_index(drop=True)
 
+                def with_total_row(df):
+                    total_row = pd.DataFrame([{"일자": "총합계", "금액": df["금액"].sum()}])
+                    return pd.concat([df, total_row], ignore_index=True)
+
+                st.divider()
                 col_left, col_right = st.columns(2)
                 with col_left:
                     st.markdown("**📄 계산서 발행 내역**")
                     if inv_df.empty:
                         st.caption("없음")
                     else:
-                        render_html_table(inv_df, money_cols=["금액"], left_cols=[])
+                        render_html_table(with_total_row(inv_df), money_cols=["금액"], left_cols=[])
                 with col_right:
                     st.markdown("**💰 입금 내역**")
                     if pay_df.empty:
                         st.caption("없음")
                     else:
-                        render_html_table(pay_df, money_cols=["금액"], left_cols=[])
+                        render_html_table(with_total_row(pay_df), money_cols=["금액"], left_cols=[])
 
                 if not change_df.empty:
                     st.markdown("**📝 변경계약 내역**")
@@ -807,6 +820,12 @@ with tab_admin:
                             if isinstance(c_flag, str) and c_flag.strip() != "":
                                 is_active = 0
                                 status_label = c_flag.strip()
+                            else:
+                                # 회색 음영(테마 색상) 처리된 행 = 관리 안 하는 현장
+                                fill = ws.cell(row=start_row + i, column=8).fill.fgColor
+                                if getattr(fill, "type", None) == "theme":
+                                    is_active = 0
+                                    status_label = "미관리(회색표시)"
 
                             contract_date = to_date_s(r[11])
                             ym = to_date_s(r[10])
