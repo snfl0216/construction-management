@@ -160,7 +160,9 @@ def fmt_money_cols(df, cols):
 
 
 def render_html_table(df, money_cols=None, left_cols=None):
-    """현장명만 왼쪽, 금액은 오른쪽(콤마), 나머진 가운데 정렬로 확실하게 고정해서 그린다."""
+    """현장명만 왼쪽, 금액은 오른쪽(콤마), 나머진 가운데 정렬로 확실하게 고정해서 그린다.
+    td/th에 직접 text-align을 걸면 스트림릿 내부 표 스타일이랑 충돌해서 안 먹는 경우가 있어,
+    셀 안에 div를 하나 더 넣어 그 div에서 정렬한다 (표 스타일과 완전히 분리됨)."""
     money_cols = set(money_cols or [])
     left_cols = set(left_cols if left_cols is not None else ["현장명"])
     d = df.copy()
@@ -168,8 +170,8 @@ def render_html_table(df, money_cols=None, left_cols=None):
     html += "<thead><tr>"
     for col in d.columns:
         align = "right" if col in money_cols else ("left" if col in left_cols else "center")
-        html += (f"<th style='padding:6px 10px;border-bottom:2px solid #ddd;background:#fafafa;"
-                  f"text-align:{align} !important;white-space:nowrap;'>{col}</th>")
+        html += (f"<th style='padding:0;border-bottom:2px solid #ddd;background:#fafafa;'>"
+                  f"<div style='padding:6px 10px;text-align:{align};white-space:nowrap;'>{col}</div></th>")
     html += "</tr></thead><tbody>"
     for _, row in d.iterrows():
         html += "<tr>"
@@ -184,8 +186,8 @@ def render_html_table(df, money_cols=None, left_cols=None):
             else:
                 val_disp = "" if pd.isna(val) else str(val)
                 align = "left" if col in left_cols else "center"
-            html += (f"<td style='padding:5px 10px;border-bottom:1px solid #eee;"
-                      f"text-align:{align} !important;white-space:nowrap;'>{val_disp}</td>")
+            html += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
+                      f"<div style='padding:5px 10px;text-align:{align};white-space:nowrap;'>{val_disp}</div></td>")
         html += "</tr>"
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
@@ -289,7 +291,9 @@ with tab_receivable:
 
         st.divider()
         st.markdown("#### 🔍 필터")
-        f1, f2, f3 = st.columns(3)
+        f0, f1, f2, f3 = st.columns(4)
+        div_options = ["전체"] + sorted(active_df["division"].replace("", "미분류").fillna("미분류").unique().tolist())
+        div_filter = f0.selectbox("구분별(ENC/필로브/대리점)", div_options)
         company_options = ["전체"] + sorted(active_df["company_name"].dropna().unique().tolist())
         company_filter = f1.selectbox("업체별", company_options)
         manager_options = ["전체"] + sorted(active_df["manager"].dropna().unique().tolist())
@@ -299,6 +303,9 @@ with tab_receivable:
         year_filter = f3.selectbox("계약일(연도)별", year_options)
 
         filtered_df = active_df.copy()
+        div_series_all = filtered_df["division"].replace("", "미분류").fillna("미분류")
+        if div_filter != "전체":
+            filtered_df = filtered_df[div_series_all == div_filter]
         if company_filter != "전체":
             filtered_df = filtered_df[filtered_df["company_name"] == company_filter]
         if manager_filter != "전체":
@@ -308,32 +315,24 @@ with tab_receivable:
 
         st.caption(f"{len(filtered_df)}개 현장 표시 중")
 
-        def build_show_df(df):
-            disp = df.rename(columns={
-                "division": "구분", "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
-                "contract_amount": "총계약금액", "total_paid": "총입금액", "unpaid_balance": "미수잔액",
-                "manager": "담당자",
-            })
-            disp["번호"] = df["no_number"].apply(lambda x: str(int(x)) if pd.notna(x) else "-")
-            disp["공정율(%)"] = (df["progress_rate"] * 100).round(0).astype(int)
-            disp["기성율(%)"] = (df["invoice_progress_rate"] * 100).round(0).astype(int)
-            cols = ["번호", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
-            return disp[cols].reset_index(drop=True)
+        dc1, dc2, dc3 = st.columns(3)
+        dc1.metric("표시 중 계약금액 합계", f"{filtered_df['contract_amount'].sum():,} 원")
+        dc2.metric("표시 중 입금액 합계", f"{filtered_df['total_paid'].sum():,} 원")
+        dc3.metric("표시 중 미수잔액 합계", f"{filtered_df['unpaid_balance'].sum():,} 원")
 
-        divisions = filtered_df["division"].replace("", "미분류").fillna("미분류")
         st.divider()
-        for div_name in sorted(divisions.unique().tolist()):
-            div_df = filtered_df[divisions == div_name]
-            if div_df.empty:
-                continue
-            st.markdown(f"### 🏢 {div_name} ({len(div_df)}개 현장)")
-            dc1, dc2, dc3 = st.columns(3)
-            dc1.metric(f"{div_name} 계약금액 합계", f"{div_df['contract_amount'].sum():,} 원")
-            dc2.metric(f"{div_name} 입금액 합계", f"{div_df['total_paid'].sum():,} 원")
-            dc3.metric(f"{div_name} 미수잔액 합계", f"{div_df['unpaid_balance'].sum():,} 원")
-            show_df = build_show_df(div_df.sort_values("no_number"))
-            render_html_table(show_df, money_cols=["총계약금액", "총입금액", "미수잔액"])
-            st.divider()
+        disp = filtered_df.rename(columns={
+            "site_name": "현장명", "company_name": "업체명", "contract_date": "계약일",
+            "contract_amount": "총계약금액", "total_paid": "총입금액", "unpaid_balance": "미수잔액",
+            "manager": "담당자",
+        })
+        disp["번호"] = filtered_df["no_number"].apply(lambda x: str(int(x)) if pd.notna(x) else "-")
+        disp["구분"] = filtered_df["division"].replace("", "미분류").fillna("미분류")
+        disp["공정율(%)"] = (filtered_df["progress_rate"] * 100).round(0).astype(int)
+        disp["기성율(%)"] = (filtered_df["invoice_progress_rate"] * 100).round(0).astype(int)
+        cols = ["번호", "구분", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
+        show_df = disp.assign(_sortno=filtered_df["no_number"]).sort_values("_sortno")[cols].reset_index(drop=True)
+        render_html_table(show_df, money_cols=["총계약금액", "총입금액", "미수잔액"])
 
         st.markdown("## 🔍 현장 상세 내역")
         sel_site = st.selectbox("현장 선택", show_df["현장명"].tolist())
