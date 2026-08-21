@@ -151,6 +151,23 @@ def fmt_money(x):
         return str(x)
 
 
+def to_won_from_thousands(v):
+    """미수내역 엑셀은 금액이 '천원' 단위로 저장돼있어 *1000 해야 하는데,
+    int(v)*1000처럼 먼저 정수로 자르고 곱하면 소수점(600원 단위 등)이 통째로 날아간다.
+    반드시 원래 값에 1000을 곱한 다음 반올림해야 한다."""
+    if v is None:
+        return 0
+    try:
+        if pd.isna(v):
+            return 0
+    except (TypeError, ValueError):
+        pass
+    try:
+        return round(float(v) * 1000)
+    except (TypeError, ValueError):
+        return 0
+
+
 def fmt_money_cols(df, cols):
     df = df.copy()
     for c in cols:
@@ -908,8 +925,8 @@ with tab_admin:
                                 "sn": r[7], "cn": r[8] or "", "mg": r[24] or "", "br": r[4] or "",
                                 "cc": r[3] or "", "cd": contract_date, "sd": to_date_s(r[12]), "ed": to_date_s(r[13]),
                                 "ym": ym,
-                                "ca": parse_amount(r[16]) * 1000, "cha": parse_amount(r[15]) * 1000,
-                                "tp": parse_amount(r[17]) * 1000, "ub": parse_amount(r[18]) * 1000,
+                                "ca": to_won_from_thousands(r[16]), "cha": to_won_from_thousands(r[15]),
+                                "tp": to_won_from_thousands(r[17]), "ub": to_won_from_thousands(r[18]),
                                 "pr": float(r[19]) if isinstance(r[19], (int, float)) else 0,
                                 "ipr": float(r[20]) if isinstance(r[20], (int, float)) else 0,
                                 "iir": float(r[21]) if isinstance(r[21], (int, float)) else 0,
@@ -925,19 +942,19 @@ with tab_admin:
                                     conn.execute(text("""
                                         INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
                                         VALUES (:sid,'변경계약',:dt,:amt,:note)
-                                    """), {"sid": site_id, "dt": to_date_s(d[11]), "amt": int(d[15]) * 1000, "note": d[12] or ""})
+                                    """), {"sid": site_id, "dt": to_date_s(d[11]), "amt": to_won_from_thousands(d[15]), "note": d[12] or ""})
                                 # 계산서: col28=발행일, col29=발행액
                                 if isinstance(d[28], datetime) and isinstance(d[29], (int, float)) and d[29]:
                                     conn.execute(text("""
                                         INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
                                         VALUES (:sid,'계산서',:dt,:amt,'')
-                                    """), {"sid": site_id, "dt": to_date_s(d[28]), "amt": int(d[29]) * 1000})
+                                    """), {"sid": site_id, "dt": to_date_s(d[28]), "amt": to_won_from_thousands(d[29])})
                                 # 입금: col31=입금일, col32=입금액
                                 if isinstance(d[31], datetime) and isinstance(d[32], (int, float)) and d[32]:
                                     conn.execute(text("""
                                         INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
                                         VALUES (:sid,'입금',:dt,:amt,'')
-                                    """), {"sid": site_id, "dt": to_date_s(d[31]), "amt": int(d[32]) * 1000})
+                                    """), {"sid": site_id, "dt": to_date_s(d[31]), "amt": to_won_from_thousands(d[32])})
                                 j += 1
                             i = j
                         else:
