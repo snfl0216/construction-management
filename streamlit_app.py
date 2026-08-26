@@ -792,7 +792,9 @@ with tab_calendar:
                     remark_v = ""
 
                 day_rows.append({
-                    "현장명": c["site_name"], "채권종류": c["claim_type"], "청구금액": c["claim_amount"],
+                    "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
+                    "채권종류": c["claim_type"], "담당자": c["manager"] if pd.notna(c["manager"]) else "-",
+                    "청구금액": c["claim_amount"],
                     "상태": status_html, "최초예정일": c["original_due_date"] or "-",
                     "지연횟수": delay_count, "총지연일수": delay_days,
                     "비고": remark_v,
