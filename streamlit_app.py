@@ -774,15 +774,26 @@ with tab_calendar:
                 else:
                     status_label, sort_rank = ("지연중", 1) if delay_days > 0 else ("입금대기", 2)
 
+                if status_label == "완납":
+                    status_html = f"<span style='background:#e6f7ec;color:#1e7e34;padding:2px 8px;border-radius:4px;'>{status_label}</span>"
+                elif "지연" in status_label:
+                    status_html = f"<span style='background:#fdecea;color:#c0392b;padding:2px 8px;border-radius:4px;'>{status_label}</span>"
+                else:
+                    status_html = status_label
+
+                remark_v = c["last_remark"] if pd.notna(c["last_remark"]) else ""
+                if str(remark_v).strip().lower() in ("nan", "none"):
+                    remark_v = ""
+
                 day_rows.append({
                     "현장명": c["site_name"], "채권종류": c["claim_type"], "청구금액": c["claim_amount"],
-                    "상태": status_label, "최초예정일": c["original_due_date"] or "-",
+                    "상태": status_html, "최초예정일": c["original_due_date"] or "-",
                     "지연횟수": delay_count, "총지연일수": delay_days,
-                    "비고": c["last_remark"] if pd.notna(c["last_remark"]) and c["last_remark"] else "-",
+                    "비고": remark_v,
                     "_sort": sort_rank,
                 })
             day_df = pd.DataFrame(day_rows).sort_values("_sort").drop(columns=["_sort"]) if day_rows else pd.DataFrame(day_rows)
-            render_html_table(day_df, money_cols=["청구금액"], wrap_cols=["현장명", "비고"])
+            render_html_table(day_df, money_cols=["청구금액"], wrap_cols=["현장명", "비고"], left_cols=["현장명", "비고"])
         else:
             st.caption("이 달에는 예정된 청구가 없습니다.")
 
@@ -977,8 +988,9 @@ with tab_admin:
                         else:
                             status = "입금대기"
 
-                        remark_v = str(last.get("remark", "") or "").strip()
-                        if remark_v.lower() == "none":
+                        remark_raw = last.get("remark", "")
+                        remark_v = "" if pd.isna(remark_raw) else str(remark_raw).strip()
+                        if remark_v.lower() in ("none", "nan"):
                             remark_v = ""
 
                         res = conn.execute(text("""
