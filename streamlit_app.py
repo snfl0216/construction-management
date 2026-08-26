@@ -186,15 +186,17 @@ def fmt_money_cols(df, cols):
     return df
 
 
-def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, narrow_cols=None):
+def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, narrow_cols=None, col_max_width=None):
     """헤더는 항상 가운데 정렬(공통), 데이터는 금액=오른쪽/현장명=왼쪽/나머지=가운데.
     td/th에 직접 text-align을 걸면 스트림릿 내부 표 스타일이랑 충돌해서 안 먹는 경우가 있어,
     셀 안에 div를 하나 더 넣어 그 div에서 정렬한다 (표 스타일과 완전히 분리됨).
     fixed_layout=True 이면 컬럼 너비를 균등 고정폭으로 맞춘다 (계약현황처럼 셀 내용이 다 짧을 때만 사용).
-    narrow_cols: fixed_layout=True일 때, 지정한 컬럼만 폭을 좁게 잡고 나머진 균등분할 (계약현황의 '현장수' 계열용)."""
+    narrow_cols: fixed_layout=True일 때, 지정한 컬럼만 폭을 좁게 잡고 나머진 균등분할 (계약현황의 '현장수' 계열용).
+    col_max_width: {컬럼명: 'Npx'} 특정 컬럼만 최대 너비를 제한 (fixed_layout=False인 표에서도 사용 가능)."""
     money_cols = set(money_cols or [])
     left_cols = set(left_cols if left_cols is not None else ["현장명"])
     narrow_cols = set(narrow_cols or [])
+    col_max_width = col_max_width or {}
     d = df.copy()
 
     def fmt_plain(v):
@@ -218,8 +220,9 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, n
     html = f"<div style='overflow-x:auto;'><table style='width:100%;{layout_style}border-collapse:collapse;font-size:13px;'>{colgroup}"
     html += "<thead><tr>"
     for col in d.columns:
+        mw = f"max-width:{col_max_width[col]};" if col in col_max_width else ""
         html += (f"<th style='padding:0;border-bottom:2px solid #ddd;background:#fafafa;'>"
-                  f"<div style='padding:6px 10px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' title='{col}'>{col}</div></th>")
+                  f"<div style='padding:6px 10px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{mw}' title='{col}'>{col}</div></th>")
     html += "</tr></thead><tbody>"
     for _, row in d.iterrows():
         html += "<tr>"
@@ -234,8 +237,11 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, n
             else:
                 val_disp = fmt_plain(val)
                 align = "left" if col in left_cols else "center"
+            has_html = "<" in val_disp
+            mw = f"max-width:{col_max_width[col]};" if col in col_max_width else ""
+            title_attr = "" if has_html else f" title='{val_disp}'"
             html += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
-                      f"<div style='padding:5px 10px;text-align:{align};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' title='{val_disp}'>{val_disp}</div></td>")
+                      f"<div style='padding:5px 10px;text-align:{align};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{mw}'{title_attr}>{val_disp}</div></td>")
         html += "</tr>"
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
@@ -333,13 +339,13 @@ with tab_receivable:
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("활성 현장 수", f"{len(active_df)}개")
-        c2.metric("총 계약금액", f"{(active_df['contract_amount']+active_df['change_amount']).sum():,} 원")
-        c3.metric("총 입금액", f"{active_df['total_paid'].sum():,} 원")
-        c4.metric("총 미수잔액", f"{active_df['unpaid_balance'].sum():,} 원")
+        c2.metric("총 계약금액(부가세 포함)", f"{(active_df['contract_amount']+active_df['change_amount']).sum():,} 원")
+        c3.metric("총 입금액(부가세 포함)", f"{active_df['total_paid'].sum():,} 원")
+        c4.metric("총 미수잔액(부가세 포함)", f"{active_df['unpaid_balance'].sum():,} 원")
 
         st.divider()
         st.markdown("#### 🔍 필터")
-        f0, f1, f2, f3 = st.columns(4)
+        f0, f1, f2, f3, f4 = st.columns(5)
         div_options = ["전체"] + sorted(active_df["division"].replace("", "미분류").fillna("미분류").unique().tolist())
         div_filter = f0.selectbox("구분별(ENC/필로브/대리점)", div_options)
         company_options = ["전체"] + sorted(active_df["company_name"].dropna().unique().tolist())
@@ -349,6 +355,7 @@ with tab_receivable:
         year_series = pd.to_datetime(active_df["contract_date"], errors="coerce").dt.year.dropna().astype(int)
         year_options = ["전체"] + sorted(year_series.unique().tolist(), reverse=True)
         year_filter = f3.selectbox("계약일(연도)별", year_options)
+        billing_filter = f4.selectbox("기성청구 필요 여부", ["전체", "필요한 현장만", "필요없음"])
 
         filtered_df = active_df.copy()
         div_series_all = filtered_df["division"].replace("", "미분류").fillna("미분류")
@@ -361,12 +368,18 @@ with tab_receivable:
         if year_filter != "전체":
             filtered_df = filtered_df[pd.to_datetime(filtered_df["contract_date"], errors="coerce").dt.year == year_filter]
 
+        billing_gap_all = (filtered_df["progress_rate"] - filtered_df["invoice_progress_rate"]) * 100
+        if billing_filter == "필요한 현장만":
+            filtered_df = filtered_df[billing_gap_all > 0]
+        elif billing_filter == "필요없음":
+            filtered_df = filtered_df[billing_gap_all <= 0]
+
         st.caption(f"{len(filtered_df)}개 현장 표시 중")
 
         dc1, dc2, dc3 = st.columns(3)
-        dc1.metric("표시 중 계약금액 합계", f"{filtered_df['contract_amount'].sum():,} 원")
-        dc2.metric("표시 중 입금액 합계", f"{filtered_df['total_paid'].sum():,} 원")
-        dc3.metric("표시 중 미수잔액 합계", f"{filtered_df['unpaid_balance'].sum():,} 원")
+        dc1.metric("계약금액 합계(부가세 포함)", f"{filtered_df['contract_amount'].sum():,} 원")
+        dc2.metric("입금액 합계(부가세 포함)", f"{filtered_df['total_paid'].sum():,} 원")
+        dc3.metric("미수잔액 합계(부가세 포함)", f"{filtered_df['unpaid_balance'].sum():,} 원")
 
         st.divider()
         disp = filtered_df.rename(columns={
@@ -378,7 +391,11 @@ with tab_receivable:
         disp["구분"] = filtered_df["division"].replace("", "미분류").fillna("미분류")
         disp["공정율(%)"] = (filtered_df["progress_rate"] * 100).round(0).astype(int)
         disp["기성율(%)"] = (filtered_df["invoice_progress_rate"] * 100).round(0).astype(int)
-        cols = ["번호", "구분", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자"]
+        gap = disp["공정율(%)"] - disp["기성율(%)"]
+        disp["비고"] = gap.apply(
+            lambda g: f"<span style='color:#c0392b;font-weight:700;background:#fdecea;padding:2px 6px;border-radius:4px;'>기성청구 필요 (+{g}%p)</span>" if g > 0 else ""
+        )
+        cols = ["번호", "구분", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자", "비고"]
         DIVISION_ORDER = {"ENC": 0, "필로브": 1, "대리점": 2}
         show_df = (
             disp.assign(
@@ -416,7 +433,8 @@ with tab_receivable:
         flush_subtotal(prev_div, group_rows)
 
         show_df_final = pd.DataFrame(rows_with_subtotal)[cols]
-        render_html_table(show_df_final, money_cols=["총계약금액", "총입금액", "미수잔액"])
+        render_html_table(show_df_final, money_cols=["총계약금액", "총입금액", "미수잔액"],
+                           col_max_width={"현장명": "180px"})
 
         st.markdown("## 🔍 현장 상세 내역")
         sel_site = st.selectbox("현장 선택", show_df["현장명"].tolist())
