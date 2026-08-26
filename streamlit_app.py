@@ -911,7 +911,8 @@ with tab_admin:
                                 payment_events.append((pdate, pa))
                         total_paid = sum(a for _, a in payment_events)
 
-                        cur_due = safe_date(last.get("current_due_date"))
+                        valid_date_rows = grp[grp["_due_sort"].notna()]
+                        cur_due = safe_date(valid_date_rows.iloc[-1]["current_due_date"]) if not valid_date_rows.empty else None
                         cur_due_str = cur_due.isoformat() if cur_due else None
                         status_raw = str(last.get("status_raw", "") or "")
 
