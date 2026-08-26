@@ -668,9 +668,9 @@ with tab_calendar:
 
         header_cols = st.columns(7, gap="small")
         for i, lab in enumerate(weekday_labels):
-            wcolor = "#e74c3c" if i == 0 else ("#2980b9" if i == 6 else "#333")
+            wcolor = "#ff8080" if i == 0 else ("#8ab4ff" if i == 6 else "#fff")
             header_cols[i].markdown(
-                f"<div style='text-align:center;font-weight:800;padding:6px 0;background:#333;color:{wcolor if False else ('#ff8080' if i==0 else ('#8ab4ff' if i==6 else '#fff'))};border-radius:6px;'>{lab}</div>",
+                f"<div style='text-align:center;font-weight:800;padding:6px 0;background:#333;color:{wcolor};border-radius:6px;'>{lab}</div>",
                 unsafe_allow_html=True
             )
 
