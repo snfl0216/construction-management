@@ -97,6 +97,16 @@ with engine.connect() as conn:
             note TEXT
         );
     """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS contract_status_raw (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            year INTEGER,
+            label TEXT,
+            m1 REAL, m2 REAL, m3 REAL, m4 REAL, m5 REAL, m6 REAL,
+            m7 REAL, m8 REAL, m9 REAL, m10 REAL, m11 REAL, m12 REAL,
+            total REAL
+        );
+    """))
     conn.commit()
 
 
@@ -706,29 +716,44 @@ with tab_risk:
 with tab_contract:
     st.subheader("📈 계약현황 (연도별)")
     with engine.connect() as conn:
-        sr_df = pd.read_sql("SELECT * FROM site_receivables;", conn)
+        cs_df = pd.read_sql("SELECT * FROM contract_status_raw;", conn)
 
-    if sr_df.empty:
-        st.info("데이터가 없습니다.")
+    if cs_df.empty:
+        st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '현장별 미수관리' 엑셀을 업로드해주세요.")
     else:
-        sr_df["_ym"] = pd.to_datetime(sr_df["contract_yearmonth"], errors="coerce")
-        sr_df = sr_df[sr_df["_ym"].notna()]
-        sr_df["연도"] = sr_df["_ym"].dt.year
-        sr_df["월"] = sr_df["_ym"].dt.month
-        sr_df["_total"] = sr_df["contract_amount"] + sr_df["change_amount"]
+        LABEL_MAP = {
+            "총 계약금": "총계약금", "서울": "서울계약", "대구": "대구계약", "대리점": "대리점계약",
+            "총 현장수": "현장수", "서울현장수": "서울현장수", "대구현장수": "대구현장수", "대리점현장수": "대리점현장수",
+        }
+        cs_df = cs_df[cs_df["label"].isin(LABEL_MAP.keys())].copy()
+        cs_df["label"] = cs_df["label"].map(LABEL_MAP)
 
-        yearly = sr_df.groupby("연도").agg(총계약금액=("_total", "sum"), 현장수=("id", "count")).reset_index()
-        for branch in sorted(sr_df["branch"].dropna().unique().tolist()):
-            b = sr_df[sr_df["branch"] == branch].groupby("연도")["_total"].sum()
-            yearly[f"{branch}계약금액"] = yearly["연도"].map(b).fillna(0).astype(int)
+        yearly = cs_df.pivot_table(index="year", columns="label", values="total", aggfunc="first").reset_index()
+        yearly = yearly.rename(columns={"year": "연도"})
+        col_order = ["연도", "총계약금", "현장수", "서울계약", "서울현장수", "대구계약", "대구현장수", "대리점계약", "대리점현장수"]
+        col_order = [c for c in col_order if c in yearly.columns]
+        yearly = yearly[col_order].sort_values("연도")
+        for c in ["현장수", "서울현장수", "대구현장수", "대리점현장수"]:
+            if c in yearly.columns:
+                yearly[c] = yearly[c].fillna(0).astype(int)
 
-        money_cols = [c for c in yearly.columns if "계약금액" in c]
-        render_html_table(yearly.sort_values("연도"), money_cols=money_cols, left_cols=[])
+        money_cols = [c for c in yearly.columns if "계약" in c]
+        render_html_table(yearly, money_cols=money_cols, left_cols=[])
 
         st.divider()
-        sel_year = st.selectbox("월별로 보기", sorted(sr_df["연도"].unique().tolist(), reverse=True))
-        monthly = sr_df[sr_df["연도"] == sel_year].groupby("월").agg(계약금액=("_total", "sum"), 현장수=("id", "count")).reset_index()
-        render_html_table(monthly, money_cols=["계약금액"], left_cols=[])
+        sel_year = st.selectbox("월별로 보기", sorted(cs_df["year"].unique().tolist(), reverse=True))
+        month_cols = [f"m{i}" for i in range(1, 13)]
+        y_df = cs_df[cs_df["year"] == sel_year].set_index("label")[month_cols].T
+        y_df.index = range(1, 13)
+        y_df = y_df.reset_index().rename(columns={"index": "월"})
+        col_order_m = ["월", "총계약금", "현장수", "서울계약", "서울현장수", "대구계약", "대구현장수", "대리점계약", "대리점현장수"]
+        col_order_m = [c for c in col_order_m if c in y_df.columns]
+        y_df = y_df[col_order_m]
+        for c in ["현장수", "서울현장수", "대구현장수", "대리점현장수"]:
+            if c in y_df.columns:
+                y_df[c] = y_df[c].fillna(0).astype(int)
+        money_cols_m = [c for c in y_df.columns if "계약" in c]
+        render_html_table(y_df, money_cols=money_cols_m, left_cols=[])
 
         st.download_button("📥 연도별 CSV 다운로드", yearly.to_csv(index=False).encode("utf-8-sig"),
                             file_name=f"계약현황_연도별_{date.today()}.csv", mime="text/csv")
@@ -885,9 +910,38 @@ with tab_admin:
                     return all(v is None for v in r)
 
                 with engine.connect() as conn:
-                    for t in ["site_receivable_details", "site_receivables"]:
+                    for t in ["site_receivable_details", "site_receivables", "contract_status_raw"]:
                         conn.execute(text(f"DELETE FROM {t};"))
                     conn.commit()
+
+                    n_status_rows = 0
+                    if "계약현황" in wb.sheetnames:
+                        ws_cs = wb["계약현황"]
+                        KEEP_LABELS = ("총 계약금", "서울", "대구", "대리점",
+                                       "총 현장수", "서울현장수", "대구현장수", "대리점현장수")
+                        for row in ws_cs.iter_rows(min_row=1, values_only=True):
+                            if len(row) < 16:
+                                continue
+                            year_v, label_v = row[1], row[2]
+                            if not isinstance(year_v, (int, float)) or label_v not in KEEP_LABELS:
+                                continue
+                            months = row[3:15]
+                            total_v = row[15]
+
+                            def to_f(v):
+                                return float(v) if isinstance(v, (int, float)) else None
+
+                            conn.execute(text("""
+                                INSERT INTO contract_status_raw
+                                (year, label, m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,m12, total)
+                                VALUES (:yr,:lb,:m1,:m2,:m3,:m4,:m5,:m6,:m7,:m8,:m9,:m10,:m11,:m12,:tot)
+                            """), {
+                                "yr": int(year_v), "lb": label_v,
+                                **{f"m{k+1}": to_f(months[k]) for k in range(12)},
+                                "tot": to_f(total_v),
+                            })
+                            n_status_rows += 1
+                        conn.commit()
 
                     n_sites = 0
                     i = 0
@@ -960,7 +1014,7 @@ with tab_admin:
                         else:
                             i += 1
                     conn.commit()
-                st.success(f"✅ 완료! 현장 {n_sites}개 반영 (기존 데이터는 전부 새 데이터로 갈음됨)")
+                st.success(f"✅ 완료! 현장 {n_sites}개, 계약현황 {n_status_rows}행 반영 (기존 데이터는 전부 새 데이터로 갈음됨)")
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ 처리 오류: {e}")
