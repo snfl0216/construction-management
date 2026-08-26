@@ -660,10 +660,10 @@ with tab_calendar:
         <style>
         div[data-testid="stHorizontalBlock"] div.stButton > button {
             border-radius: 6px 6px 0 0 !important;
-            border-bottom: none !important;
+            border: none !important;
             font-weight: 800 !important;
             padding: 2px 0 !important;
-            background-color: #f2f2f2 !important;
+            background-color: #eeeeee !important;
         }
         </style>
         """, unsafe_allow_html=True)
@@ -682,14 +682,13 @@ with tab_calendar:
                 with row_cols[i]:
                     if daynum == 0:
                         st.markdown(
-                            f"<div style='height:{BODY_HEIGHT + 38}px;background:#fafafa;border:1px solid #eee;border-radius:6px;'></div>",
+                            f"<div style='height:{BODY_HEIGHT + 38}px;background:#fafafa;border-radius:6px;'></div>",
                             unsafe_allow_html=True
                         )
                         continue
 
                     is_today = (daynum == today.day and yr == today.year and mo == today.month)
-                    border_color = "#ccc"
-                    daynum_html = (f"<span style='background:#e2e2e2;color:#222;padding:1px 7px;border-radius:10px;'>{daynum}</span>"
+                    daynum_html = (f"<span style='background:#dedede;color:#222;padding:1px 7px;border-radius:10px;'>{daynum}</span>"
                                    if is_today else str(daynum))
 
                     if st.button(str(daynum), key=f"cal_{yr}_{mo}_{daynum}", use_container_width=True):
@@ -706,11 +705,13 @@ with tab_calendar:
                     if len(entries) > MAX_SHOWN:
                         body += f"<div style='font-size:10px;color:#999;'>+{len(entries) - MAX_SHOWN}건 더</div>"
 
+                    # 테두리 없이 옅은 배경만 깔아서, 버튼과의 이음새가 안 보이게 함
                     st.markdown(
-                        f"<div style='height:{BODY_HEIGHT}px;overflow:hidden;border:2px solid {border_color};border-top:none;"
+                        f"<div style='height:{BODY_HEIGHT}px;overflow:hidden;background:#f7f7f7;"
                         f"border-radius:0 0 6px 6px;padding:4px 5px;margin-top:-6px;'>{body}</div>",
                         unsafe_allow_html=True
                     )
+            st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
         st.divider()
         dates_with_entries = sorted(
