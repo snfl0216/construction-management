@@ -621,7 +621,7 @@ with tab_calendar:
                 st.session_state.cal_month = 12
                 st.session_state.cal_year -= 1
             st.rerun()
-        nav2.markdown(f"<h3 style='text-align:center'>{st.session_state.cal_year}년 {st.session_state.cal_month}월</h3>", unsafe_allow_html=True)
+        nav2.markdown(f"<h2 style='text-align:center;margin:0;'>{st.session_state.cal_year}년 {st.session_state.cal_month}월</h2>", unsafe_allow_html=True)
         if nav3.button("다음달 ▶", use_container_width=True):
             st.session_state.cal_month += 1
             if st.session_state.cal_month == 13:
@@ -629,7 +629,7 @@ with tab_calendar:
                 st.session_state.cal_year += 1
             st.rerun()
 
-        st.caption("🔴 미입금(지연)  🟢 입금완료")
+        st.caption("🔴 예정일이 지났는데 아직 입금 안 됨 (지연)　🟢 입금완료　⚪ 아직 예정일 안 지남")
         yr, mo = st.session_state.cal_year, st.session_state.cal_month
 
         day_entries = {}
@@ -638,53 +638,67 @@ with tab_calendar:
             if d and d.year == yr and d.month == mo:
                 st_disp = display_status(c["status"], c["current_due_date"], today)
                 if c["status"] == "완납":
-                    color = "#2ecc71"
+                    color = "#27ae60"
                 elif "지연" in st_disp:
                     color = "#e74c3c"
                 else:
-                    color = "#888888"
-                site_short = c["site_name"][:16] + ("…" if len(c["site_name"]) > 16 else "")
+                    color = "#95a5a6"
+                site_short = c["site_name"][:14] + ("…" if len(c["site_name"]) > 14 else "")
                 amt_disp = f"{int(c['claim_amount']) // 1000:,}"
-                day_entries.setdefault(d.day, []).append({"site": site_short, "claim_type": c["claim_type"], "amt": amt_disp, "color": color})
+                day_entries.setdefault(d.day, []).append(
+                    {"site": site_short, "claim_type": c["claim_type"], "amt": amt_disp, "color": color}
+                )
 
         cal = pycal.Calendar(firstweekday=6)
         weeks = cal.monthdayscalendar(yr, mo)
         weekday_labels = ["일", "월", "화", "수", "목", "금", "토"]
-        header_cols = st.columns(7)
+
+        MAX_SHOWN = 5
+        grid_html = (
+            "<div style='border:2px solid #333;border-radius:10px;overflow:hidden;font-size:13px;'>"
+            "<div style='display:grid;grid-template-columns:repeat(7,1fr);background:#333;'>"
+        )
         for i, lab in enumerate(weekday_labels):
-            header_cols[i].markdown(f"<div style='text-align:center;font-weight:bold'>{lab}</div>", unsafe_allow_html=True)
+            wcolor = "#ff8080" if i == 0 else ("#8ab4ff" if i == 6 else "#fff")
+            grid_html += f"<div style='text-align:center;padding:8px 0;color:{wcolor};font-weight:700;'>{lab}</div>"
+        grid_html += "</div>"
 
-        MAX_SHOWN = 6
         for week in weeks:
-            row_cols = st.columns(7)
+            grid_html += "<div style='display:grid;grid-template-columns:repeat(7,1fr);'>"
             for i, daynum in enumerate(week):
+                is_today = (daynum == today.day and yr == today.year and mo == today.month)
+                border_top = "3px solid #e67e22" if is_today else "1px solid #ddd"
                 if daynum == 0:
-                    row_cols[i].write("")
+                    grid_html += "<div style='min-height:112px;background:#fafafa;border-top:1px solid #ddd;border-right:1px solid #eee;'></div>"
                     continue
-                with row_cols[i]:
-                    if st.button(str(daynum), key=f"cal_{yr}_{mo}_{daynum}", use_container_width=True):
-                        st.session_state["cal_selected_date"] = date(yr, mo, daynum).isoformat()
-                    entries = day_entries.get(daynum, [])
-                    if entries:
-                        rows_html = ""
-                        shown = entries[:MAX_SHOWN]
-                        for idx, e in enumerate(shown):
-                            border_style = "" if idx == len(shown) - 1 else "border-bottom:1px solid #eee;"
-                            rows_html += (
-                                f"<div style='padding:3px 2px;{border_style}'>"
-                                f"<div style='font-size:14px;font-weight:700;color:#000;line-height:1.25;"
-                                f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis' title='{e['site']}'>"
-                                f"<span style='color:{e['color']}'>●</span> {e['site']}</div>"
-                                "<div style='font-size:12px;color:#333;display:flex;justify-content:space-between;'>"
-                                f"<span>{e['claim_type']}</span><span>{e['amt']}</span></div></div>"
-                            )
-                        more_html = f"<div style='font-size:11px;color:#888;'>+{len(entries)-MAX_SHOWN}건 더</div>" if len(entries) > MAX_SHOWN else ""
-                        st.markdown(f"<div style='border:1px solid #d9d9d9;border-radius:6px;padding:4px 6px;'>{rows_html}{more_html}</div>", unsafe_allow_html=True)
+                entries = day_entries.get(daynum, [])
+                daynum_color = "#e67e22" if is_today else ("#e74c3c" if i == 0 else ("#2980b9" if i == 6 else "#222"))
+                cell = (f"<div style='min-height:112px;border-top:{border_top};border-right:1px solid #eee;"
+                        f"padding:4px 5px;vertical-align:top;'>"
+                        f"<div style='font-weight:800;font-size:14px;color:{daynum_color};margin-bottom:3px;'>{daynum}</div>")
+                shown = entries[:MAX_SHOWN]
+                for e in shown:
+                    cell += (
+                        f"<div style='font-size:11px;line-height:1.35;color:#000;white-space:nowrap;overflow:hidden;"
+                        f"text-overflow:ellipsis;' title='{e['site']} {e['claim_type']} {e['amt']}'>"
+                        f"<span style='color:{e['color']};font-size:13px;'>●</span> {e['site']} <span style='color:#666;'>{e['claim_type']}</span></div>"
+                    )
+                if len(entries) > MAX_SHOWN:
+                    cell += f"<div style='font-size:10px;color:#999;'>+{len(entries) - MAX_SHOWN}건 더</div>"
+                cell += "</div>"
+                grid_html += cell
+            grid_html += "</div>"
+        grid_html += "</div>"
+        st.markdown(grid_html, unsafe_allow_html=True)
 
-        sel_date = st.session_state.get("cal_selected_date")
-        if sel_date:
-            st.divider()
-            st.markdown(f"#### 📌 {sel_date} 입금예정 목록")
+        st.divider()
+        dates_with_entries = sorted(
+            {safe_date(c["current_due_date"]).isoformat() for _, c in claims_df.iterrows()
+             if safe_date(c["current_due_date"]) and safe_date(c["current_due_date"]).year == yr
+             and safe_date(c["current_due_date"]).month == mo}
+        )
+        if dates_with_entries:
+            sel_date = st.selectbox("📌 날짜별 상세 목록 보기", dates_with_entries)
             day_rows = []
             for _, c in claims_df.iterrows():
                 d = safe_date(c["current_due_date"])
@@ -693,10 +707,9 @@ with tab_calendar:
                         "현장명": c["site_name"], "채권종류": c["claim_type"], "청구금액": c["claim_amount"],
                         "상태": display_status(c["status"], c["current_due_date"], today),
                     })
-            if day_rows:
-                render_html_table(pd.DataFrame(day_rows), money_cols=["청구금액"])
-            else:
-                st.info("해당 날짜에 예정된 청구가 없습니다.")
+            render_html_table(pd.DataFrame(day_rows), money_cols=["청구금액"])
+        else:
+            st.caption("이 달에는 예정된 청구가 없습니다.")
 
 # ==========================================================================
 # TAB: 리스크 현장 (이력 데이터만)
