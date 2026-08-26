@@ -57,6 +57,15 @@ with engine.connect() as conn:
             reason TEXT
         );
     """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS claim_checkpoints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            claim_id INTEGER,
+            checkpoint_date TEXT,
+            remark TEXT,
+            unpaid_balance INTEGER
+        );
+    """))
     # ===== 현장별 미수관리(미수내역) 기준 : 현장별 미수현황 / 완불현장 / 계약현황 =====
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS site_receivables (
@@ -625,6 +634,7 @@ with tab_calendar:
             "OR (original_due_date IS NOT NULL AND original_due_date != '');", conn
         )
         history_df = pd.read_sql("SELECT * FROM claim_delay_history;", conn)
+        checkpoints_df = pd.read_sql("SELECT * FROM claim_checkpoints;", conn)
 
     if claims_df.empty:
         st.info("데이터가 없습니다.")
@@ -650,18 +660,18 @@ with tab_calendar:
             st.rerun()
 
         st.caption("🔴 예정일이 지났는데 아직 입금 안 됨 (지연)　🟢 입금완료　⚪ 아직 예정일 안 지남　"
-                   "／ 최초예정일이 지연된 청구는 최초예정일에도 🔴로 표시됩니다 (실제 예정일은 예정일 칸에 따로 표시)")
+                   "／ 중간에 밀렸던 예정일들도(경과된 예정일) 전부 그 날짜에 🔴로 남습니다")
         yr, mo = st.session_state.cal_year, st.session_state.cal_month
 
         day_entries = {}
         for _, c in claims_df.iterrows():
+            cid = c["id"]
             site_short = c["site_name"][:14] + ("…" if len(c["site_name"]) > 14 else "")
             amt_disp = f"{int(c['claim_amount']) // 1000:,}"
 
             cur_d = safe_date(c["current_due_date"])
-            orig_d = safe_date(c["original_due_date"])
 
-            # 1) 현재(최종) 예정일 — 항상 표시
+            # 1) 현재(최종) 예정일 — 항상 실시간 상태로 표시
             if cur_d and cur_d.year == yr and cur_d.month == mo:
                 st_disp = display_status(c["status"], c["current_due_date"], today)
                 if c["status"] == "완납":
@@ -674,12 +684,24 @@ with tab_calendar:
                     {"site": site_short, "claim_type": c["claim_type"], "amt": amt_disp, "color": color}
                 )
 
-            # 2) 최초예정일 — 이미 지났고, 최종예정일이랑 다르고, 아직 미해결이면 '경고'로 별도 표시
-            if (orig_d and orig_d.year == yr and orig_d.month == mo and orig_d < today
-                    and orig_d != cur_d and c["status"] != "완납"):
-                day_entries.setdefault(orig_d.day, []).append(
-                    {"site": site_short, "claim_type": c["claim_type"] + "(최초약속일)", "amt": amt_disp, "color": "#e74c3c"}
-                )
+            # 2) 과거에 밀렸던 예정일들 전부 — 이력(claim_delay_history)에 있는 모든 지점.
+            #    최초예정일 하나만이 아니라, 중간에 여러 번 밀린 경우 그 경유지들도 다 '경고'로 남긴다.
+            if c["status"] != "완납":
+                hist = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
+                checkpoint_dates = set()
+                orig_d = safe_date(c["original_due_date"])
+                if orig_d:
+                    checkpoint_dates.add(orig_d)
+                for _, h in hist.iterrows():
+                    od = safe_date(h["old_due_date"])
+                    if od:
+                        checkpoint_dates.add(od)
+
+                for cp in checkpoint_dates:
+                    if cp.year == yr and cp.month == mo and cp < today and cp != cur_d:
+                        day_entries.setdefault(cp.day, []).append(
+                            {"site": site_short, "claim_type": c["claim_type"] + "(경과된 예정일)", "amt": amt_disp, "color": "#e74c3c"}
+                        )
 
         cal = pycal.Calendar(firstweekday=6)
         weeks = cal.monthdayscalendar(yr, mo)
@@ -758,17 +780,26 @@ with tab_calendar:
             for _, c in claims_df.iterrows():
                 cid = c["id"]
                 cur_d = safe_date(c["current_due_date"])
-                orig_d = safe_date(c["original_due_date"])
-                matched = False
-                if cur_d == sel_d:
-                    matched = True
-                elif orig_d == sel_d and orig_d and orig_d < today and orig_d != cur_d and c["status"] != "완납":
-                    matched = True
-                if not matched:
+                hist_all = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
+
+                is_current_match = (cur_d == sel_d)
+                is_checkpoint_match = False
+                if c["status"] != "완납" and not is_current_match:
+                    checkpoint_dates = set()
+                    orig_d = safe_date(c["original_due_date"])
+                    if orig_d:
+                        checkpoint_dates.add(orig_d)
+                    for _, h in hist_all.iterrows():
+                        od = safe_date(h["old_due_date"])
+                        if od:
+                            checkpoint_dates.add(od)
+                    if sel_d in checkpoint_dates and sel_d < today:
+                        is_checkpoint_match = True
+
+                if not (is_current_match or is_checkpoint_match):
                     continue
 
-                hist = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
-                delay_count = len(hist)
+                delay_count = len(hist_all)
                 delay_days = calc_delay_days(c["original_due_date"], today) if c["status"] != "확인필요" else 0
 
                 if c["status"] == "완납":
@@ -777,6 +808,8 @@ with tab_calendar:
                     status_label, sort_rank = "확인필요", 3
                 elif c["status"] == "일부입금":
                     status_label, sort_rank = ("일부입금(지연)", 1) if delay_days > 0 else ("일부입금", 2)
+                elif is_checkpoint_match:
+                    status_label, sort_rank = "지연중(경과된 예정일)", 1
                 else:
                     status_label, sort_rank = ("지연중", 1) if delay_days > 0 else ("입금대기", 2)
 
@@ -787,7 +820,14 @@ with tab_calendar:
                 else:
                     status_html = status_label
 
-                remark_v = c["last_remark"] if pd.notna(c["last_remark"]) else ""
+                # 그 날짜(sel_d)에 실제로 적혀있던 비고를 그대로 찾아서 붙인다 (최신 비고로 통일하지 않음)
+                remark_v = ""
+                if not checkpoints_df.empty:
+                    cp_match = checkpoints_df[(checkpoints_df["claim_id"] == cid) & (checkpoints_df["checkpoint_date"] == sel_date)]
+                    if not cp_match.empty:
+                        remark_v = cp_match.iloc[-1]["remark"] or ""
+                if not remark_v and is_current_match:
+                    remark_v = c["last_remark"] if pd.notna(c["last_remark"]) else ""
                 if str(remark_v).strip().lower() in ("nan", "none"):
                     remark_v = ""
 
@@ -960,7 +1000,7 @@ with tab_admin:
                 raw_df["_due_sort"] = pd.to_datetime(raw_df.get("current_due_date"), errors="coerce")
 
                 with engine.connect() as conn:
-                    for t in ["claim_delay_history", "payments", "claims"]:
+                    for t in ["claim_delay_history", "claim_checkpoints", "payments", "claims"]:
                         conn.execute(text(f"DELETE FROM {t};"))
                     conn.commit()
 
@@ -1054,6 +1094,20 @@ with tab_admin:
                                     """), {"cid": claim_id, "old": prev_due.isoformat(), "new": this_due.isoformat(), "ddays": (this_due - prev_due).days})
                                 if this_due:
                                     prev_due = this_due
+
+                                # 이 행 자체의 예정일 + 그 행에 적힌 비고를 그대로 체크포인트로 남긴다
+                                # (달력에서 특정 날짜를 볼 때, 그날 실제로 적혀있던 비고를 그대로 보여주기 위함)
+                                if this_due:
+                                    row_remark_raw = r.get("remark", "")
+                                    row_remark = "" if pd.isna(row_remark_raw) else str(row_remark_raw).strip()
+                                    if row_remark.lower() in ("none", "nan"):
+                                        row_remark = ""
+                                    row_unpaid_raw = r.get("sheet_unpaid_balance", None)
+                                    row_unpaid = parse_amount(row_unpaid_raw) if pd.notna(row_unpaid_raw) else None
+                                    conn.execute(text("""
+                                        INSERT INTO claim_checkpoints (claim_id, checkpoint_date, remark, unpaid_balance)
+                                        VALUES (:cid, :cdate, :remark, :unpaid)
+                                    """), {"cid": claim_id, "cdate": this_due.isoformat(), "remark": row_remark, "unpaid": row_unpaid})
 
                             # 실제 들어온 금액(total_paid)만큼 딱 하나의 입금 기록으로 남긴다 (개별 로그 다 넣으면 취소분까지 같이 잡힘)
                             if total_paid > 0:
