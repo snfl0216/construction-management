@@ -24,6 +24,7 @@ with engine.connect() as conn:
         CREATE TABLE IF NOT EXISTS claims (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             site_name TEXT,
+            company_name TEXT,
             manager TEXT,
             claim_type TEXT DEFAULT '기성금',
             claim_date TEXT,
@@ -90,6 +91,11 @@ with engine.connect() as conn:
             pass
     try:
         conn.execute(text("ALTER TABLE claims ADD COLUMN last_remark TEXT;"))
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute(text("ALTER TABLE claims ADD COLUMN company_name TEXT;"))
         conn.commit()
     except Exception:
         pass
@@ -942,7 +948,7 @@ with tab_admin:
                     "담당자": "manager", "기성구분": "claim_type", "미수금액": "claim_amount",
                     "최초예정일": "original_due_date", "입금예정일": "current_due_date",
                     "지연여부": "status_raw", "입금여부": "paid_flag", "입금액": "paid_amount",
-                    "비고": "remark",
+                    "비고": "remark", "미수잔액": "sheet_unpaid_balance",
                 }
                 for c in list(raw_df.columns):
                     if "입금상태" in c or "입금일자" in c:
@@ -959,78 +965,110 @@ with tab_admin:
                     has_bond = "bond_name" in raw_df.columns
                     groups = raw_df.groupby("bond_name") if has_bond else [(i, raw_df.loc[[i]]) for i in raw_df.index]
                     n_claims = 0
-                    for _, grp in groups:
-                        grp = grp.sort_values("_due_sort", na_position="last")
-                        first, last = grp.iloc[0], grp.iloc[-1]
-                        site_name = str(first.get("site_name", "")).strip()
-                        manager = str(first.get("manager", "") or "")
-                        claim_type_v = str(last.get("claim_type", "") or "기성금")
-                        claim_amount = parse_amount(last.get("claim_amount", 0))
-                        orig_due = safe_date(first.get("original_due_date")) or safe_date(first.get("current_due_date"))
-                        orig_due_str = orig_due.isoformat() if orig_due else None
+                    for _, grp_raw in groups:
+                        # 채권명이 같아도(현장+업체+구분+금액 우연히 동일), 중간에 미수잔액이 0으로
+                        # 완전히 끝났다가 이후에 다시 미수금이 생기면 별개의 새 채권으로 취급해서 쪼갠다.
+                        grp_phys = grp_raw.sort_index()
+                        episodes = []
+                        cur_ep = []
+                        for _, r in grp_phys.iterrows():
+                            cur_ep.append(r)
+                            rb = r.get("sheet_unpaid_balance", None)
+                            try:
+                                rb_val = float(rb) if rb is not None and pd.notna(rb) else None
+                            except (TypeError, ValueError):
+                                rb_val = None
+                            if rb_val is not None and rb_val <= 0:
+                                episodes.append(pd.DataFrame(cur_ep))
+                                cur_ep = []
+                        if cur_ep:
+                            episodes.append(pd.DataFrame(cur_ep))
+                        if not episodes:
+                            continue
 
-                        payment_events = []
-                        for _, r in grp.iterrows():
-                            pa = parse_amount(r.get("paid_amount", 0))
-                            pdate = safe_date(r.get("payment_date_raw"))
-                            if pdate and pa > 0:
-                                payment_events.append((pdate, pa))
-                        total_paid = sum(a for _, a in payment_events)
+                        for grp in episodes:
+                            grp = grp.sort_values("_due_sort", na_position="last")
+                            first, last = grp.iloc[0], grp.iloc[-1]
+                            site_name = str(first.get("site_name", "")).strip()
+                            company_name_v = str(first.get("company_name", "") or "")
+                            manager = str(first.get("manager", "") or "")
+                            claim_type_v = str(last.get("claim_type", "") or "기성금")
+                            claim_amount = parse_amount(last.get("claim_amount", 0))
+                            orig_due = safe_date(first.get("original_due_date")) or safe_date(first.get("current_due_date"))
+                            orig_due_str = orig_due.isoformat() if orig_due else None
 
-                        valid_date_rows = grp[grp["_due_sort"].notna()]
-                        cur_due = safe_date(valid_date_rows.iloc[-1]["current_due_date"]) if not valid_date_rows.empty else None
-                        cur_due_str = cur_due.isoformat() if cur_due else None
-                        status_raw = str(last.get("status_raw", "") or "")
+                            valid_date_rows = grp[grp["_due_sort"].notna()]
+                            last_valid_row = valid_date_rows.iloc[-1] if not valid_date_rows.empty else last
+                            cur_due = safe_date(last_valid_row.get("current_due_date"))
+                            cur_due_str = cur_due.isoformat() if cur_due else None
+                            status_raw = str(last.get("status_raw", "") or "")
 
-                        if total_paid >= claim_amount and claim_amount > 0:
-                            status = "완납"
-                        elif total_paid > 0:
-                            status = "일부입금"
-                        elif cur_due_str is None:
-                            status = "확인필요"
-                        else:
-                            status = "입금대기"
+                            payment_events = []
+                            for _, r in grp.iterrows():
+                                pa = parse_amount(r.get("paid_amount", 0))
+                                pdate = safe_date(r.get("payment_date_raw"))
+                                if pdate and pa > 0:
+                                    payment_events.append((pdate, pa))
 
-                        remark_raw = last.get("remark", "")
-                        remark_v = "" if pd.isna(remark_raw) else str(remark_raw).strip()
-                        if remark_v.lower() in ("none", "nan"):
-                            remark_v = ""
+                            # 이력 로그를 그냥 다 더하면, 나중에 취소/정정된 입금까지 합산돼서 완납으로 잘못 판정될 수 있다.
+                            # 그래서 "지금 이 순간 미수잔액이 얼마인가"를 이력의 마지막 줄에서 직접 읽어와 그걸 진실로 삼는다.
+                            sheet_unpaid_raw = last_valid_row.get("sheet_unpaid_balance", None)
+                            if pd.notna(sheet_unpaid_raw):
+                                sheet_unpaid = parse_amount(sheet_unpaid_raw)
+                                total_paid = max(0, claim_amount - sheet_unpaid)
+                            else:
+                                total_paid = sum(a for _, a in payment_events)
 
-                        res = conn.execute(text("""
-                            INSERT INTO claims (site_name, manager, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status, last_remark)
-                            VALUES (:sn, :mg, :ctype, :cdate, :odue, :cdue, :amt, :status, :remark)
-                        """), {"sn": site_name, "mg": manager, "ctype": claim_type_v, "cdate": orig_due_str,
-                               "odue": orig_due_str, "cdue": cur_due_str, "amt": claim_amount, "status": status,
-                               "remark": remark_v})
-                        claim_id = res.lastrowid
-                        n_claims += 1
+                            if total_paid >= claim_amount and claim_amount > 0:
+                                status = "완납"
+                            elif total_paid > 0:
+                                status = "일부입금"
+                            elif cur_due_str is None:
+                                status = "확인필요"
+                            else:
+                                status = "입금대기"
 
-                        prev_due = orig_due
-                        for _, r in grp.iterrows():
-                            this_due = safe_date(r.get("current_due_date"))
-                            if this_due and prev_due and this_due != prev_due:
-                                conn.execute(text("""
-                                    INSERT INTO claim_delay_history (claim_id, event_type, old_due_date, new_due_date, delay_days, reason)
-                                    VALUES (:cid, '자동지연', :old, :new, :ddays, '엑셀 이력 가져오기')
-                                """), {"cid": claim_id, "old": prev_due.isoformat(), "new": this_due.isoformat(), "ddays": (this_due - prev_due).days})
-                            if this_due:
-                                prev_due = this_due
+                            remark_raw = last.get("remark", "")
+                            remark_v = "" if pd.isna(remark_raw) else str(remark_raw).strip()
+                            if remark_v.lower() in ("none", "nan"):
+                                remark_v = ""
 
-                        for pdate, pamt in payment_events:
-                            pdate_final = pdate or cur_due or date.today()
-                            conn.execute(text("INSERT INTO payments (claim_id, payment_date, payment_amount) VALUES (:cid,:pd,:pa)"),
-                                         {"cid": claim_id, "pd": pdate_final.isoformat(), "pa": pamt})
-                        if status == "완납" and payment_events:
-                            last_pay_date = max(p[0] for p in payment_events if p[0]) if any(p[0] for p in payment_events) else cur_due
-                            delay_days = 0
-                            event_type = "입금완료(정상)"
-                            if orig_due and last_pay_date and last_pay_date > orig_due:
-                                delay_days = (last_pay_date - orig_due).days
-                                event_type = "입금완료(지연)"
-                            conn.execute(text("""
-                                INSERT INTO claim_delay_history (claim_id, event_type, payment_date, delay_days, reason)
-                                VALUES (:cid, :etype, :pd, :dd, '엑셀 이력 가져오기')
-                            """), {"cid": claim_id, "etype": event_type, "pd": last_pay_date.isoformat() if last_pay_date else None, "dd": delay_days})
+                            res = conn.execute(text("""
+                                INSERT INTO claims (site_name, company_name, manager, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status, last_remark)
+                                VALUES (:sn, :cn, :mg, :ctype, :cdate, :odue, :cdue, :amt, :status, :remark)
+                            """), {"sn": site_name, "cn": company_name_v, "mg": manager, "ctype": claim_type_v, "cdate": orig_due_str,
+                                   "odue": orig_due_str, "cdue": cur_due_str, "amt": claim_amount, "status": status,
+                                   "remark": remark_v})
+                            claim_id = res.lastrowid
+                            n_claims += 1
+
+                            prev_due = orig_due
+                            for _, r in grp.iterrows():
+                                this_due = safe_date(r.get("current_due_date"))
+                                if this_due and prev_due and this_due != prev_due:
+                                    conn.execute(text("""
+                                        INSERT INTO claim_delay_history (claim_id, event_type, old_due_date, new_due_date, delay_days, reason)
+                                        VALUES (:cid, '자동지연', :old, :new, :ddays, '엑셀 이력 가져오기')
+                                    """), {"cid": claim_id, "old": prev_due.isoformat(), "new": this_due.isoformat(), "ddays": (this_due - prev_due).days})
+                                if this_due:
+                                    prev_due = this_due
+
+                            # 실제 들어온 금액(total_paid)만큼 딱 하나의 입금 기록으로 남긴다 (개별 로그 다 넣으면 취소분까지 같이 잡힘)
+                            if total_paid > 0:
+                                valid_pay_dates = [pd for pd, _ in payment_events if pd]
+                                pdate_final = max(valid_pay_dates) if valid_pay_dates else (cur_due or date.today())
+                                conn.execute(text("INSERT INTO payments (claim_id, payment_date, payment_amount) VALUES (:cid,:pd,:pa)"),
+                                             {"cid": claim_id, "pd": pdate_final.isoformat(), "pa": total_paid})
+                                if status == "완납":
+                                    delay_days = 0
+                                    event_type = "입금완료(정상)"
+                                    if orig_due and pdate_final > orig_due:
+                                        delay_days = (pdate_final - orig_due).days
+                                        event_type = "입금완료(지연)"
+                                    conn.execute(text("""
+                                        INSERT INTO claim_delay_history (claim_id, event_type, payment_date, delay_days, reason)
+                                        VALUES (:cid, :etype, :pd, :dd, '엑셀 이력 가져오기')
+                                    """), {"cid": claim_id, "etype": event_type, "pd": pdate_final.isoformat(), "dd": delay_days})
                     conn.commit()
                 st.success(f"✅ 완료! 청구 {n_claims}건 반영 (기존 데이터는 전부 새 데이터로 갈음됨)")
                 st.rerun()
