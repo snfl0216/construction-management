@@ -368,11 +368,13 @@ with tab_receivable:
         if year_filter != "전체":
             filtered_df = filtered_df[pd.to_datetime(filtered_df["contract_date"], errors="coerce").dt.year == year_filter]
 
-        billing_gap_all = (filtered_df["progress_rate"] - filtered_df["invoice_progress_rate"]) * 100
+        prog_pct_all = filtered_df["progress_rate"] * 100
+        inv_pct_all = filtered_df["invoice_progress_rate"] * 100
+        billing_needed_all = (prog_pct_all >= 60) & (inv_pct_all < prog_pct_all)
         if billing_filter == "필요한 현장만":
-            filtered_df = filtered_df[billing_gap_all > 0]
+            filtered_df = filtered_df[billing_needed_all]
         elif billing_filter == "필요없음":
-            filtered_df = filtered_df[billing_gap_all <= 0]
+            filtered_df = filtered_df[~billing_needed_all]
 
         st.caption(f"{len(filtered_df)}개 현장 표시 중")
 
@@ -391,10 +393,15 @@ with tab_receivable:
         disp["구분"] = filtered_df["division"].replace("", "미분류").fillna("미분류")
         disp["공정율(%)"] = (filtered_df["progress_rate"] * 100).round(0).astype(int)
         disp["기성율(%)"] = (filtered_df["invoice_progress_rate"] * 100).round(0).astype(int)
-        gap = disp["공정율(%)"] - disp["기성율(%)"]
-        disp["비고"] = gap.apply(
-            lambda g: f"<span style='color:#c0392b;font-weight:700;background:#fdecea;padding:2px 6px;border-radius:4px;'>기성청구 필요 (+{g}%p)</span>" if g > 0 else ""
-        )
+        def billing_note(row):
+            prog, inv = row["공정율(%)"], row["기성율(%)"]
+            if prog < 60 or inv >= prog:
+                return ""
+            if prog >= 80:
+                return "<span style='color:#c0392b;'>잔금 청구 필요</span>"
+            return "<span style='color:#c0392b;'>중도금 청구 필요</span>"
+
+        disp["비고"] = disp.apply(billing_note, axis=1)
         cols = ["번호", "구분", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자", "비고"]
         DIVISION_ORDER = {"ENC": 0, "필로브": 1, "대리점": 2}
         show_df = (
@@ -434,7 +441,7 @@ with tab_receivable:
 
         show_df_final = pd.DataFrame(rows_with_subtotal)[cols]
         render_html_table(show_df_final, money_cols=["총계약금액", "총입금액", "미수잔액"],
-                           col_max_width={"현장명": "180px"})
+                           col_max_width={"비고": "120px"})
 
         st.markdown("## 🔍 현장 상세 내역")
         sel_site = st.selectbox("현장 선택", show_df["현장명"].tolist())
