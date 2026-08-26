@@ -193,12 +193,20 @@ def render_html_table(df, money_cols=None, left_cols=None):
     money_cols = set(money_cols or [])
     left_cols = set(left_cols if left_cols is not None else ["현장명"])
     d = df.copy()
-    html = "<div style='overflow-x:auto;'><table style='width:100%;border-collapse:collapse;font-size:13px;'>"
+
+    def fmt_plain(v):
+        if pd.isna(v):
+            return ""
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        return str(v)
+
+    html = "<div style='overflow-x:auto;'><table style='width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px;'>"
     html += "<thead><tr>"
     for col in d.columns:
         align = "right" if col in money_cols else ("left" if col in left_cols else "center")
         html += (f"<th style='padding:0;border-bottom:2px solid #ddd;background:#fafafa;'>"
-                  f"<div style='padding:6px 10px;text-align:{align};white-space:nowrap;'>{col}</div></th>")
+                  f"<div style='padding:6px 10px;text-align:{align};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' title='{col}'>{col}</div></th>")
     html += "</tr></thead><tbody>"
     for _, row in d.iterrows():
         html += "<tr>"
@@ -208,13 +216,13 @@ def render_html_table(df, money_cols=None, left_cols=None):
                 try:
                     val_disp = f"{int(val):,}"
                 except (TypeError, ValueError):
-                    val_disp = "" if pd.isna(val) else str(val)
+                    val_disp = fmt_plain(val)
                 align = "right"
             else:
-                val_disp = "" if pd.isna(val) else str(val)
+                val_disp = fmt_plain(val)
                 align = "left" if col in left_cols else "center"
             html += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
-                      f"<div style='padding:5px 10px;text-align:{align};white-space:nowrap;'>{val_disp}</div></td>")
+                      f"<div style='padding:5px 10px;text-align:{align};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' title='{val_disp}'>{val_disp}</div></td>")
         html += "</tr>"
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
@@ -730,6 +738,7 @@ with tab_contract:
 
         yearly = cs_df.pivot_table(index="year", columns="label", values="total", aggfunc="first").reset_index()
         yearly = yearly.rename(columns={"year": "연도"})
+        yearly["연도"] = yearly["연도"].astype(int)
         col_order = ["연도", "총계약금", "현장수", "서울계약", "서울현장수", "대구계약", "대구현장수", "대리점계약", "대리점현장수"]
         col_order = [c for c in col_order if c in yearly.columns]
         yearly = yearly[col_order].sort_values("연도")
