@@ -192,17 +192,19 @@ def fmt_money_cols(df, cols):
     return df
 
 
-def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, narrow_cols=None, col_max_width=None):
+def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, narrow_cols=None, col_max_width=None, wrap_cols=None):
     """헤더는 항상 가운데 정렬(공통), 데이터는 금액=오른쪽/현장명=왼쪽/나머지=가운데.
     td/th에 직접 text-align을 걸면 스트림릿 내부 표 스타일이랑 충돌해서 안 먹는 경우가 있어,
     셀 안에 div를 하나 더 넣어 그 div에서 정렬한다 (표 스타일과 완전히 분리됨).
     fixed_layout=True 이면 컬럼 너비를 균등 고정폭으로 맞춘다 (계약현황처럼 셀 내용이 다 짧을 때만 사용).
     narrow_cols: fixed_layout=True일 때, 지정한 컬럼만 폭을 좁게 잡고 나머진 균등분할 (계약현황의 '현장수' 계열용).
-    col_max_width: {컬럼명: 'Npx'} 특정 컬럼만 최대 너비를 제한 (fixed_layout=False인 표에서도 사용 가능)."""
+    col_max_width: {컬럼명: 'Npx'} 특정 컬럼만 최대 너비를 제한 (fixed_layout=False인 표에서도 사용 가능).
+    wrap_cols: 지정한 컬럼은 줄임표(...) 안 쓰고 텍스트 전체를 줄바꿈해서 다 보여준다."""
     money_cols = set(money_cols or [])
     left_cols = set(left_cols if left_cols is not None else ["현장명"])
     narrow_cols = set(narrow_cols or [])
     col_max_width = col_max_width or {}
+    wrap_cols = set(wrap_cols or [])
     d = df.copy()
 
     def fmt_plain(v):
@@ -227,8 +229,9 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, n
     html += "<thead><tr>"
     for col in d.columns:
         mw = f"max-width:{col_max_width[col]};" if col in col_max_width else ""
+        wrap_style = "white-space:normal;overflow:visible;text-overflow:clip;" if col in wrap_cols else "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
         html += (f"<th style='padding:0;border-bottom:2px solid #ddd;background:#fafafa;'>"
-                  f"<div style='padding:6px 10px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{mw}' title='{col}'>{col}</div></th>")
+                  f"<div style='padding:6px 10px;text-align:center;{wrap_style}{mw}' title='{col}'>{col}</div></th>")
     html += "</tr></thead><tbody>"
     for _, row in d.iterrows():
         html += "<tr>"
@@ -245,9 +248,10 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, n
                 align = "left" if col in left_cols else "center"
             has_html = "<" in val_disp
             mw = f"max-width:{col_max_width[col]};" if col in col_max_width else ""
-            title_attr = "" if has_html else f" title='{val_disp}'"
+            wrap_style = "white-space:normal;overflow:visible;text-overflow:clip;" if col in wrap_cols else "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+            title_attr = "" if (has_html or col in wrap_cols) else f" title='{val_disp}'"
             html += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
-                      f"<div style='padding:5px 10px;text-align:{align};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{mw}'{title_attr}>{val_disp}</div></td>")
+                      f"<div style='padding:5px 10px;text-align:{align};{wrap_style}{mw}'{title_attr}>{val_disp}</div></td>")
         html += "</tr>"
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
@@ -685,6 +689,8 @@ with tab_calendar:
             border: none !important;
             font-weight: 800 !important;
             padding: 2px 0 !important;
+        }
+        div[data-testid="stHorizontalBlock"] div.stButton > button[kind="secondary"] {
             background-color: #eeeeee !important;
         }
         </style>
@@ -710,10 +716,9 @@ with tab_calendar:
                         continue
 
                     is_today = (daynum == today.day and yr == today.year and mo == today.month)
-                    daynum_html = (f"<span style='background:#dedede;color:#222;padding:1px 7px;border-radius:10px;'>{daynum}</span>"
-                                   if is_today else str(daynum))
 
-                    if st.button(str(daynum), key=f"cal_{yr}_{mo}_{daynum}", use_container_width=True):
+                    if st.button(str(daynum), key=f"cal_{yr}_{mo}_{daynum}", use_container_width=True,
+                                 type="primary" if is_today else "secondary"):
                         st.session_state["cal_selected_date"] = date(yr, mo, daynum).isoformat()
 
                     entries = day_entries.get(daynum, [])
@@ -748,30 +753,36 @@ with tab_calendar:
                 cid = c["id"]
                 cur_d = safe_date(c["current_due_date"])
                 orig_d = safe_date(c["original_due_date"])
-                matched_kind = None
+                matched = False
                 if cur_d == sel_d:
-                    matched_kind = "현재예정일"
+                    matched = True
                 elif orig_d == sel_d and orig_d and orig_d < today and orig_d != cur_d and c["status"] != "완납":
-                    matched_kind = "최초약속일(경과)"
-                if not matched_kind:
+                    matched = True
+                if not matched:
                     continue
 
                 hist = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
                 delay_count = len(hist)
+                delay_days = calc_delay_days(c["original_due_date"], today) if c["status"] != "확인필요" else 0
+
                 if c["status"] == "완납":
-                    ref_date = today
+                    status_label, sort_rank = "완납", 0
+                elif c["status"] == "확인필요":
+                    status_label, sort_rank = "확인필요", 3
+                elif c["status"] == "일부입금":
+                    status_label, sort_rank = ("일부입금(지연)", 1) if delay_days > 0 else ("일부입금", 2)
                 else:
-                    ref_date = today
-                delay_days = calc_delay_days(c["original_due_date"], ref_date) if c["status"] != "확인필요" else 0
+                    status_label, sort_rank = ("지연중", 1) if delay_days > 0 else ("입금대기", 2)
 
                 day_rows.append({
-                    "구분": matched_kind,
                     "현장명": c["site_name"], "채권종류": c["claim_type"], "청구금액": c["claim_amount"],
-                    "상태": display_status(c["status"], c["current_due_date"], today),
+                    "상태": status_label, "최초예정일": c["original_due_date"] or "-",
                     "지연횟수": delay_count, "총지연일수": delay_days,
                     "비고": c["last_remark"] if pd.notna(c["last_remark"]) and c["last_remark"] else "-",
+                    "_sort": sort_rank,
                 })
-            render_html_table(pd.DataFrame(day_rows), money_cols=["청구금액"], col_max_width={"현장명": "170px", "비고": "220px"})
+            day_df = pd.DataFrame(day_rows).sort_values("_sort").drop(columns=["_sort"]) if day_rows else pd.DataFrame(day_rows)
+            render_html_table(day_df, money_cols=["청구금액"], wrap_cols=["현장명", "비고"])
         else:
             st.caption("이 달에는 예정된 청구가 없습니다.")
 
