@@ -31,7 +31,8 @@ with engine.connect() as conn:
             current_due_date TEXT,
             claim_amount INTEGER DEFAULT 0,
             status TEXT DEFAULT '입금대기',
-            last_flagged_due_date TEXT
+            last_flagged_due_date TEXT,
+            last_remark TEXT
         );
     """))
     conn.execute(text("""
@@ -87,6 +88,11 @@ with engine.connect() as conn:
             conn.commit()
         except Exception:
             pass
+    try:
+        conn.execute(text("ALTER TABLE claims ADD COLUMN last_remark TEXT;"))
+        conn.commit()
+    except Exception:
+        pass
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS site_receivable_details (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -604,7 +610,11 @@ with tab_progress:
 with tab_calendar:
     st.subheader("📅 입금 캘린더")
     with engine.connect() as conn:
-        claims_df = pd.read_sql("SELECT * FROM claims WHERE current_due_date IS NOT NULL AND current_due_date != '';", conn)
+        claims_df = pd.read_sql(
+            "SELECT * FROM claims WHERE (current_due_date IS NOT NULL AND current_due_date != '') "
+            "OR (original_due_date IS NOT NULL AND original_due_date != '');", conn
+        )
+        history_df = pd.read_sql("SELECT * FROM claim_delay_history;", conn)
 
     if claims_df.empty:
         st.info("데이터가 없습니다.")
@@ -629,13 +639,20 @@ with tab_calendar:
                 st.session_state.cal_year += 1
             st.rerun()
 
-        st.caption("🔴 예정일이 지났는데 아직 입금 안 됨 (지연)　🟢 입금완료　⚪ 아직 예정일 안 지남")
+        st.caption("🔴 예정일이 지났는데 아직 입금 안 됨 (지연)　🟢 입금완료　⚪ 아직 예정일 안 지남　"
+                   "／ 최초예정일이 지연된 청구는 최초예정일에도 🔴로 표시됩니다 (실제 예정일은 예정일 칸에 따로 표시)")
         yr, mo = st.session_state.cal_year, st.session_state.cal_month
 
         day_entries = {}
         for _, c in claims_df.iterrows():
-            d = safe_date(c["current_due_date"])
-            if d and d.year == yr and d.month == mo:
+            site_short = c["site_name"][:14] + ("…" if len(c["site_name"]) > 14 else "")
+            amt_disp = f"{int(c['claim_amount']) // 1000:,}"
+
+            cur_d = safe_date(c["current_due_date"])
+            orig_d = safe_date(c["original_due_date"])
+
+            # 1) 현재(최종) 예정일 — 항상 표시
+            if cur_d and cur_d.year == yr and cur_d.month == mo:
                 st_disp = display_status(c["status"], c["current_due_date"], today)
                 if c["status"] == "완납":
                     color = "#27ae60"
@@ -643,10 +660,15 @@ with tab_calendar:
                     color = "#e74c3c"
                 else:
                     color = "#95a5a6"
-                site_short = c["site_name"][:14] + ("…" if len(c["site_name"]) > 14 else "")
-                amt_disp = f"{int(c['claim_amount']) // 1000:,}"
-                day_entries.setdefault(d.day, []).append(
+                day_entries.setdefault(cur_d.day, []).append(
                     {"site": site_short, "claim_type": c["claim_type"], "amt": amt_disp, "color": color}
+                )
+
+            # 2) 최초예정일 — 이미 지났고, 최종예정일이랑 다르고, 아직 미해결이면 '경고'로 별도 표시
+            if (orig_d and orig_d.year == yr and orig_d.month == mo and orig_d < today
+                    and orig_d != cur_d and c["status"] != "완납"):
+                day_entries.setdefault(orig_d.day, []).append(
+                    {"site": site_short, "claim_type": c["claim_type"] + "(최초약속일)", "amt": amt_disp, "color": "#e74c3c"}
                 )
 
         cal = pycal.Calendar(firstweekday=6)
@@ -714,24 +736,42 @@ with tab_calendar:
             st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
         st.divider()
-        dates_with_entries = sorted(
-            {safe_date(c["current_due_date"]).isoformat() for _, c in claims_df.iterrows()
-             if safe_date(c["current_due_date"]) and safe_date(c["current_due_date"]).year == yr
-             and safe_date(c["current_due_date"]).month == mo}
-        )
+        dates_with_entries = sorted(f"{yr}-{mo:02d}-{d:02d}" for d in day_entries.keys())
         if dates_with_entries:
             clicked = st.session_state.get("cal_selected_date")
             default_idx = dates_with_entries.index(clicked) if clicked in dates_with_entries else 0
             sel_date = st.selectbox("📌 날짜별 상세 목록 보기 (달력에서 날짜를 눌러도 여기로 이동합니다)", dates_with_entries, index=default_idx)
+            sel_d = safe_date(sel_date)
+
             day_rows = []
             for _, c in claims_df.iterrows():
-                d = safe_date(c["current_due_date"])
-                if d and d.isoformat() == sel_date:
-                    day_rows.append({
-                        "현장명": c["site_name"], "채권종류": c["claim_type"], "청구금액": c["claim_amount"],
-                        "상태": display_status(c["status"], c["current_due_date"], today),
-                    })
-            render_html_table(pd.DataFrame(day_rows), money_cols=["청구금액"])
+                cid = c["id"]
+                cur_d = safe_date(c["current_due_date"])
+                orig_d = safe_date(c["original_due_date"])
+                matched_kind = None
+                if cur_d == sel_d:
+                    matched_kind = "현재예정일"
+                elif orig_d == sel_d and orig_d and orig_d < today and orig_d != cur_d and c["status"] != "완납":
+                    matched_kind = "최초약속일(경과)"
+                if not matched_kind:
+                    continue
+
+                hist = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
+                delay_count = len(hist)
+                if c["status"] == "완납":
+                    ref_date = today
+                else:
+                    ref_date = today
+                delay_days = calc_delay_days(c["original_due_date"], ref_date) if c["status"] != "확인필요" else 0
+
+                day_rows.append({
+                    "구분": matched_kind,
+                    "현장명": c["site_name"], "채권종류": c["claim_type"], "청구금액": c["claim_amount"],
+                    "상태": display_status(c["status"], c["current_due_date"], today),
+                    "지연횟수": delay_count, "총지연일수": delay_days,
+                    "비고": c["last_remark"] if pd.notna(c["last_remark"]) and c["last_remark"] else "-",
+                })
+            render_html_table(pd.DataFrame(day_rows), money_cols=["청구금액"], col_max_width={"현장명": "170px", "비고": "220px"})
         else:
             st.caption("이 달에는 예정된 청구가 없습니다.")
 
@@ -877,6 +917,7 @@ with tab_admin:
                     "담당자": "manager", "기성구분": "claim_type", "미수금액": "claim_amount",
                     "최초예정일": "original_due_date", "입금예정일": "current_due_date",
                     "지연여부": "status_raw", "입금여부": "paid_flag", "입금액": "paid_amount",
+                    "비고": "remark",
                 }
                 for c in list(raw_df.columns):
                     if "입금상태" in c or "입금일자" in c:
@@ -925,11 +966,16 @@ with tab_admin:
                         else:
                             status = "입금대기"
 
+                        remark_v = str(last.get("remark", "") or "").strip()
+                        if remark_v.lower() == "none":
+                            remark_v = ""
+
                         res = conn.execute(text("""
-                            INSERT INTO claims (site_name, manager, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status)
-                            VALUES (:sn, :mg, :ctype, :cdate, :odue, :cdue, :amt, :status)
+                            INSERT INTO claims (site_name, manager, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status, last_remark)
+                            VALUES (:sn, :mg, :ctype, :cdate, :odue, :cdue, :amt, :status, :remark)
                         """), {"sn": site_name, "mg": manager, "ctype": claim_type_v, "cdate": orig_due_str,
-                               "odue": orig_due_str, "cdue": cur_due_str, "amt": claim_amount, "status": status})
+                               "odue": orig_due_str, "cdue": cur_due_str, "amt": claim_amount, "status": status,
+                               "remark": remark_v})
                         claim_id = res.lastrowid
                         n_claims += 1
 
