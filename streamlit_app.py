@@ -662,6 +662,7 @@ with tab_calendar:
             border-bottom: none !important;
             font-weight: 800 !important;
             padding: 2px 0 !important;
+            background-color: #f2f2f2 !important;
         }
         </style>
         """, unsafe_allow_html=True)
