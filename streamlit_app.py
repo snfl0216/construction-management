@@ -186,13 +186,15 @@ def fmt_money_cols(df, cols):
     return df
 
 
-def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False):
+def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, narrow_cols=None):
     """헤더는 항상 가운데 정렬(공통), 데이터는 금액=오른쪽/현장명=왼쪽/나머지=가운데.
     td/th에 직접 text-align을 걸면 스트림릿 내부 표 스타일이랑 충돌해서 안 먹는 경우가 있어,
     셀 안에 div를 하나 더 넣어 그 div에서 정렬한다 (표 스타일과 완전히 분리됨).
-    fixed_layout=True 이면 컬럼 너비를 균등 고정폭으로 맞춘다 (계약현황처럼 셀 내용이 다 짧을 때만 사용)."""
+    fixed_layout=True 이면 컬럼 너비를 균등 고정폭으로 맞춘다 (계약현황처럼 셀 내용이 다 짧을 때만 사용).
+    narrow_cols: fixed_layout=True일 때, 지정한 컬럼만 폭을 좁게 잡고 나머진 균등분할 (계약현황의 '현장수' 계열용)."""
     money_cols = set(money_cols or [])
     left_cols = set(left_cols if left_cols is not None else ["현장명"])
+    narrow_cols = set(narrow_cols or [])
     d = df.copy()
 
     def fmt_plain(v):
@@ -203,7 +205,17 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False):
         return str(v)
 
     layout_style = "table-layout:fixed;" if fixed_layout else ""
-    html = f"<div style='overflow-x:auto;'><table style='width:100%;{layout_style}border-collapse:collapse;font-size:13px;'>"
+    colgroup = ""
+    if fixed_layout and narrow_cols:
+        n_narrow = sum(1 for c in d.columns if c in narrow_cols)
+        n_normal = len(d.columns) - n_narrow
+        narrow_w = 6
+        normal_w = (100 - narrow_w * n_narrow) / n_normal if n_normal else 0
+        colgroup = "<colgroup>" + "".join(
+            f"<col style='width:{narrow_w if c in narrow_cols else normal_w}%'>" for c in d.columns
+        ) + "</colgroup>"
+
+    html = f"<div style='overflow-x:auto;'><table style='width:100%;{layout_style}border-collapse:collapse;font-size:13px;'>{colgroup}"
     html += "<thead><tr>"
     for col in d.columns:
         html += (f"<th style='padding:0;border-bottom:2px solid #ddd;background:#fafafa;'>"
@@ -748,7 +760,8 @@ with tab_contract:
                 yearly[c] = yearly[c].fillna(0).astype(int)
 
         money_cols = [c for c in yearly.columns if "계약" in c]
-        render_html_table(yearly, money_cols=money_cols, left_cols=[], fixed_layout=True)
+        render_html_table(yearly, money_cols=money_cols, left_cols=[], fixed_layout=True,
+                           narrow_cols=["현장수", "서울현장수", "대구현장수", "대리점현장수"])
 
         st.divider()
         sel_year = st.selectbox("월별로 보기", sorted(cs_df["year"].unique().tolist(), reverse=True))
@@ -763,7 +776,8 @@ with tab_contract:
             if c in y_df.columns:
                 y_df[c] = y_df[c].fillna(0).astype(int)
         money_cols_m = [c for c in y_df.columns if "계약" in c]
-        render_html_table(y_df, money_cols=money_cols_m, left_cols=[], fixed_layout=True)
+        render_html_table(y_df, money_cols=money_cols_m, left_cols=[], fixed_layout=True,
+                           narrow_cols=["현장수", "서울현장수", "대구현장수", "대리점현장수"])
 
         st.download_button("📥 연도별 CSV 다운로드", yearly.to_csv(index=False).encode("utf-8-sig"),
                             file_name=f"계약현황_연도별_{date.today()}.csv", mime="text/csv")
