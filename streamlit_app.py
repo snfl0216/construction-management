@@ -370,7 +370,6 @@ with tab_receivable:
 
         prog_pct_all = (filtered_df["progress_rate"] * 100).round(0)
         inv_pct_all = (filtered_df["invoice_progress_rate"] * 100).round(0)
-        inv_pct_all = filtered_df["invoice_progress_rate"] * 100
         billing_needed_all = (prog_pct_all >= 60) & (inv_pct_all < prog_pct_all)
         if billing_filter == "필요한 현장만":
             filtered_df = filtered_df[billing_needed_all]
