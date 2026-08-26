@@ -790,10 +790,13 @@ with tab_calendar:
                     "상태": status_html, "최초예정일": c["original_due_date"] or "-",
                     "지연횟수": delay_count, "총지연일수": delay_days,
                     "비고": remark_v,
-                    "_sort": sort_rank,
+                    "_sort": sort_rank, "_status_plain": status_label,
                 })
-            day_df = pd.DataFrame(day_rows).sort_values("_sort").drop(columns=["_sort"]) if day_rows else pd.DataFrame(day_rows)
+            day_df_raw = pd.DataFrame(day_rows)
+            pending_total = day_df_raw[day_df_raw["_status_plain"] != "완납"]["청구금액"].sum() if not day_df_raw.empty else 0
+            day_df = day_df_raw.sort_values("_sort").drop(columns=["_sort", "_status_plain"]) if day_rows else day_df_raw
             render_html_table(day_df, money_cols=["청구금액"], wrap_cols=["현장명", "비고"], left_cols=["현장명", "비고"])
+            st.metric("💰 이 날짜 입금대기 금액 합계 (완납 제외)", f"{pending_total:,.0f} 원")
         else:
             st.caption("이 달에는 예정된 청구가 없습니다.")
 
