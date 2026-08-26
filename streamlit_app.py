@@ -684,24 +684,18 @@ with tab_calendar:
                     {"site": site_short, "claim_type": c["claim_type"], "amt": amt_disp, "color": color}
                 )
 
-            # 2) 과거에 밀렸던 예정일들 전부 — 이력(claim_delay_history)에 있는 모든 지점.
-            #    최초예정일 하나만이 아니라, 중간에 여러 번 밀린 경우 그 경유지들도 다 '경고'로 남긴다.
-            if c["status"] != "완납":
-                hist = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
-                checkpoint_dates = set()
-                orig_d = safe_date(c["original_due_date"])
-                if orig_d:
-                    checkpoint_dates.add(orig_d)
-                for _, h in hist.iterrows():
-                    od = safe_date(h["old_due_date"])
-                    if od:
-                        checkpoint_dates.add(od)
-
-                for cp in checkpoint_dates:
-                    if cp.year == yr and cp.month == mo and cp < today and cp != cur_d:
-                        day_entries.setdefault(cp.day, []).append(
-                            {"site": site_short, "claim_type": c["claim_type"] + "(경과된 예정일)", "amt": amt_disp, "color": "#e74c3c"}
-                        )
+            # 2) 과거에 밀렸던 예정일들 전부 — 그 시점(체크포인트)에 실제로 미수였던 날짜는
+            #    지금 완납됐어도 그날짜엔 그대로 남긴다 (그 순간엔 진짜 미수였으니까)
+            cp_rows = checkpoints_df[checkpoints_df["claim_id"] == cid] if not checkpoints_df.empty else pd.DataFrame()
+            for _, cp in cp_rows.iterrows():
+                cp_d = safe_date(cp["checkpoint_date"])
+                if not cp_d or cp_d.year != yr or cp_d.month != mo or cp_d >= today or cp_d == cur_d:
+                    continue
+                cp_unpaid = cp["unpaid_balance"]
+                if cp_unpaid is not None and cp_unpaid > 0:
+                    day_entries.setdefault(cp_d.day, []).append(
+                        {"site": site_short, "claim_type": c["claim_type"] + "(경과된 예정일)", "amt": amt_disp, "color": "#e74c3c"}
+                    )
 
         cal = pycal.Calendar(firstweekday=6)
         weeks = cal.monthdayscalendar(yr, mo)
@@ -784,17 +778,12 @@ with tab_calendar:
 
                 is_current_match = (cur_d == sel_d)
                 is_checkpoint_match = False
-                if c["status"] != "완납" and not is_current_match:
-                    checkpoint_dates = set()
-                    orig_d = safe_date(c["original_due_date"])
-                    if orig_d:
-                        checkpoint_dates.add(orig_d)
-                    for _, h in hist_all.iterrows():
-                        od = safe_date(h["old_due_date"])
-                        if od:
-                            checkpoint_dates.add(od)
-                    if sel_d in checkpoint_dates and sel_d < today:
-                        is_checkpoint_match = True
+                if not is_current_match and not checkpoints_df.empty:
+                    cp_hit = checkpoints_df[(checkpoints_df["claim_id"] == cid) & (checkpoints_df["checkpoint_date"] == sel_date)]
+                    if not cp_hit.empty and sel_d < today:
+                        cp_unpaid = cp_hit.iloc[-1]["unpaid_balance"]
+                        if cp_unpaid is not None and cp_unpaid > 0:
+                            is_checkpoint_match = True
 
                 if not (is_current_match or is_checkpoint_match):
                     continue
@@ -802,14 +791,14 @@ with tab_calendar:
                 delay_count = len(hist_all)
                 delay_days = calc_delay_days(c["original_due_date"], today) if c["status"] != "확인필요" else 0
 
-                if c["status"] == "완납":
+                if is_checkpoint_match:
+                    status_label, sort_rank = "지연중(경과된 예정일)", 1
+                elif c["status"] == "완납":
                     status_label, sort_rank = "완납", 0
                 elif c["status"] == "확인필요":
                     status_label, sort_rank = "확인필요", 3
                 elif c["status"] == "일부입금":
                     status_label, sort_rank = ("일부입금(지연)", 1) if delay_days > 0 else ("일부입금", 2)
-                elif is_checkpoint_match:
-                    status_label, sort_rank = "지연중(경과된 예정일)", 1
                 else:
                     status_label, sort_rank = ("지연중", 1) if delay_days > 0 else ("입금대기", 2)
 
