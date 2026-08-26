@@ -792,7 +792,7 @@ with tab_calendar:
                 delay_days = calc_delay_days(c["original_due_date"], today) if c["status"] != "확인필요" else 0
 
                 if is_checkpoint_match:
-                    status_label, sort_rank = "지연중(경과된 예정일)", 1
+                    status_label, sort_rank = "지연중", 1
                 elif c["status"] == "완납":
                     status_label, sort_rank = "완납", 0
                 elif c["status"] == "확인필요":
@@ -833,7 +833,7 @@ with tab_calendar:
             pending_total = day_df_raw[day_df_raw["_status_plain"] != "완납"]["청구금액"].sum() if not day_df_raw.empty else 0
             day_df = day_df_raw.sort_values("_sort").drop(columns=["_sort", "_status_plain"]) if day_rows else day_df_raw
             render_html_table(day_df, money_cols=["청구금액"], wrap_cols=["현장명", "비고"], left_cols=["현장명", "비고"])
-            st.metric("💰 이 날짜 입금대기 금액 합계 (완납 제외)", f"{pending_total:,.0f} 원")
+            st.metric("💰 이 날짜 미수금액 합계 (완납 제외)", f"{pending_total:,.0f} 원")
         else:
             st.caption("이 달에는 예정된 청구가 없습니다.")
 
