@@ -653,59 +653,50 @@ with tab_calendar:
         weeks = cal.monthdayscalendar(yr, mo)
         weekday_labels = ["일", "월", "화", "수", "목", "금", "토"]
 
-        MAX_SHOWN = 4
-
-        st.markdown("""
-        <style>
-        div[data-testid="stHorizontalBlock"] div.stButton > button {
-            border-radius: 6px 6px 0 0 !important;
-            border-bottom: none !important;
-            font-weight: 800 !important;
-            padding: 2px 0 !important;
-            background-color: #f2f2f2 !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-
-        header_cols = st.columns(7, gap="small")
+        MAX_SHOWN = 5
+        ROW_HEIGHT = 130
+        grid_html = (
+            "<div style='border:2px solid #333;border-radius:10px;overflow:hidden;font-size:13px;'>"
+            "<div style='display:grid;grid-template-columns:repeat(7,1fr);background:#333;'>"
+        )
         for i, lab in enumerate(weekday_labels):
             wcolor = "#ff8080" if i == 0 else ("#8ab4ff" if i == 6 else "#fff")
-            header_cols[i].markdown(
-                f"<div style='text-align:center;font-weight:800;padding:6px 0;background:#333;color:{wcolor};border-radius:6px;'>{lab}</div>",
-                unsafe_allow_html=True
-            )
+            grid_html += f"<div style='text-align:center;padding:8px 0;color:{wcolor};font-weight:700;'>{lab}</div>"
+        grid_html += "</div>"
 
+        # 주(週) 단위로 표를 따로 쪼개지 않고, 달 전체를 하나의 표로 묶어서
+        # grid-auto-rows로 줄 높이를 고정 — 내용이 없는 주도 다른 주랑 높이가 똑같아진다
+        grid_html += f"<div style='display:grid;grid-template-columns:repeat(7,1fr);grid-auto-rows:{ROW_HEIGHT}px;'>"
         for week in weeks:
-            row_cols = st.columns(7, gap="small")
             for i, daynum in enumerate(week):
-                with row_cols[i]:
-                    if daynum == 0:
-                        st.markdown("<div style='min-height:118px;background:#fafafa;border:1px solid #eee;border-radius:0 0 6px 6px;'></div>", unsafe_allow_html=True)
-                        continue
-
-                    is_today = (daynum == today.day and yr == today.year and mo == today.month)
-                    border_color = "#e67e22" if is_today else "#ddd"
-                    daynum_color = "#e67e22" if is_today else ("#e74c3c" if i == 0 else ("#2980b9" if i == 6 else "#222"))
-
-                    if st.button(str(daynum), key=f"cal_{yr}_{mo}_{daynum}", use_container_width=True):
-                        st.session_state["cal_selected_date"] = date(yr, mo, daynum).isoformat()
-
-                    entries = day_entries.get(daynum, [])
-                    body = ""
-                    for e in entries[:MAX_SHOWN]:
-                        body += (
-                            f"<div style='font-size:11px;line-height:1.35;color:#000;white-space:nowrap;overflow:hidden;"
-                            f"text-overflow:ellipsis;' title='{e['site']} {e['claim_type']} {e['amt']}'>"
-                            f"<span style='color:{e['color']};font-size:13px;'>●</span> {e['site']}</div>"
-                        )
-                    if len(entries) > MAX_SHOWN:
-                        body += f"<div style='font-size:10px;color:#999;'>+{len(entries) - MAX_SHOWN}건 더</div>"
-
-                    st.markdown(
-                        f"<div style='min-height:96px;border:2px solid {border_color};border-top:none;"
-                        f"border-radius:0 0 6px 6px;padding:4px 5px;margin-top:-6px;'>{body}</div>",
-                        unsafe_allow_html=True
+                if daynum == 0:
+                    grid_html += (f"<div style='height:{ROW_HEIGHT}px;background:#fafafa;"
+                                  f"border-top:1px solid #ddd;border-right:1px solid #eee;'></div>")
+                    continue
+                is_today = (daynum == today.day and yr == today.year and mo == today.month)
+                entries = day_entries.get(daynum, [])
+                daynum_color = "#e74c3c" if i == 0 else ("#2980b9" if i == 6 else "#222")
+                if is_today:
+                    daynum_html = f"<span style='background:#e2e2e2;color:#222;padding:1px 7px;border-radius:10px;'>{daynum}</span>"
+                else:
+                    daynum_html = f"<span style='color:{daynum_color};'>{daynum}</span>"
+                cell = (f"<div style='height:{ROW_HEIGHT}px;overflow:hidden;border-top:1px solid #ddd;border-right:1px solid #eee;"
+                        f"padding:4px 5px;vertical-align:top;'>"
+                        f"<div style='font-weight:800;font-size:14px;margin-bottom:3px;'>{daynum_html}</div>")
+                shown = entries[:MAX_SHOWN]
+                for e in shown:
+                    cell += (
+                        f"<div style='font-size:11px;line-height:1.35;color:#000;white-space:nowrap;overflow:hidden;"
+                        f"text-overflow:ellipsis;' title='{e['site']} {e['claim_type']} {e['amt']}'>"
+                        f"<span style='color:{e['color']};font-size:13px;'>●</span> {e['site']} <span style='color:#666;'>{e['claim_type']}</span></div>"
                     )
+                if len(entries) > MAX_SHOWN:
+                    cell += f"<div style='font-size:10px;color:#999;'>+{len(entries) - MAX_SHOWN}건 더</div>"
+                cell += "</div>"
+                grid_html += cell
+        grid_html += "</div>"
+        grid_html += "</div>"
+        st.markdown(grid_html, unsafe_allow_html=True)
 
         st.divider()
         dates_with_entries = sorted(
@@ -714,9 +705,7 @@ with tab_calendar:
              and safe_date(c["current_due_date"]).month == mo}
         )
         if dates_with_entries:
-            clicked = st.session_state.get("cal_selected_date")
-            default_idx = dates_with_entries.index(clicked) if clicked in dates_with_entries else 0
-            sel_date = st.selectbox("📌 날짜별 상세 목록 보기 (달력에서 날짜 눌러도 여기로 이동합니다)", dates_with_entries, index=default_idx)
+            sel_date = st.selectbox("📌 날짜별 상세 목록 보기", dates_with_entries)
             day_rows = []
             for _, c in claims_df.iterrows():
                 d = safe_date(c["current_due_date"])
