@@ -635,6 +635,7 @@ with tab_calendar:
         )
         history_df = pd.read_sql("SELECT * FROM claim_delay_history;", conn)
         checkpoints_df = pd.read_sql("SELECT * FROM claim_checkpoints;", conn)
+        payments_df = pd.read_sql("SELECT * FROM payments;", conn)
 
     if claims_df.empty:
         st.info("데이터가 없습니다.")
@@ -819,11 +820,14 @@ with tab_calendar:
                 if str(remark_v).strip().lower() in ("nan", "none"):
                     remark_v = ""
 
+                pay_rows = payments_df[payments_df["claim_id"] == cid] if not payments_df.empty else pd.DataFrame()
+                paid_date_v = pay_rows["payment_date"].max() if not pay_rows.empty else "-"
+
                 day_rows.append({
                     "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
                     "채권종류": c["claim_type"], "담당자": c["manager"] if pd.notna(c["manager"]) else "-",
                     "청구금액": c["claim_amount"],
-                    "상태": status_html, "최초예정일": c["original_due_date"] or "-",
+                    "상태": status_html, "최초예정일": c["original_due_date"] or "-", "입금일": paid_date_v,
                     "지연횟수": delay_count, "총지연일수": delay_days,
                     "비고": remark_v,
                     "_sort": sort_rank, "_status_plain": status_label,
