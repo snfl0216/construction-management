@@ -659,8 +659,7 @@ with tab_calendar:
                 st.session_state.cal_year += 1
             st.rerun()
 
-        st.caption("🔴 예정일이 지났는데 아직 입금 안 됨 (지연)　🟢 입금완료　⚪ 아직 예정일 안 지남　"
-                   "／ 중간에 밀렸던 예정일들도(경과된 예정일) 전부 그 날짜에 🔴로 남습니다")
+        st.caption("🔴 지연　🟢 입금완료　⚪ 입금대기")
         yr, mo = st.session_state.cal_year, st.session_state.cal_month
 
         day_entries = {}
