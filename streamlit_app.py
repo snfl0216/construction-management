@@ -566,16 +566,35 @@ with tab_progress:
 
         if view_mode == "현장별":
             disp = claim_df_all[claim_df_all["미수잔액"] > 0].copy()
-            f1, f2 = st.columns(2)
+            f1, f2, f3 = st.columns(3)
             site_filter = f1.selectbox("현장 필터", ["전체"] + sorted(disp["현장명"].unique().tolist()))
             type_filter = f2.selectbox("채권종류 필터", ["전체"] + CLAIM_TYPES)
+            manager_filter = f3.selectbox("담당자 필터", ["전체"] + sorted(disp["담당자"].dropna().unique().tolist()))
             if site_filter != "전체":
                 disp = disp[disp["현장명"] == site_filter]
             if type_filter != "전체":
                 disp = disp[disp["채권종류"] == type_filter]
+            if manager_filter != "전체":
+                disp = disp[disp["담당자"] == manager_filter]
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("총 청구금액 합계", f"{disp['청구금액'].sum():,} 원")
+            m2.metric("총 입금액 합계", f"{disp['입금액'].sum():,} 원")
+            m3.metric("총 미수잔액 합계", f"{disp['미수잔액'].sum():,} 원")
+
             disp = disp.assign(_sort=pd.to_datetime(disp["최초예정일"], errors="coerce")).sort_values("_sort", na_position="last")
+
+            def colorize_status(s):
+                if s in ("지연중", "일부입금(지연)"):
+                    return f"<span style='color:#c0392b;font-weight:600;'>{s}</span>"
+                if s == "확인필요":
+                    return f"<span style='color:#b7950b;font-weight:600;'>{s}</span>"
+                return s
+
             show = disp[["현장명", "담당자", "채권종류", "최초예정일", "입금예정일", "청구금액", "입금액", "미수잔액", "지연횟수", "총지연일수", "상태"]]
-            render_html_table(show, money_cols=["청구금액", "입금액", "미수잔액"])
+            show_display = show.copy()
+            show_display["상태"] = show_display["상태"].apply(colorize_status)
+            render_html_table(show_display, money_cols=["청구금액", "입금액", "미수잔액"])
             st.download_button("📥 CSV 다운로드", show.to_csv(index=False).encode("utf-8-sig"),
                                 file_name=f"기성청구현황_현장별_{date.today()}.csv", mime="text/csv")
 
@@ -971,15 +990,10 @@ with tab_admin:
         if daily_file is not None and st.button("🚀 일일수금관리 데이터로 전체 갱신", use_container_width=True):
             try:
                 xls = pd.ExcelFile(daily_file, engine="openpyxl")
-                frames = []
-                for sheet in ["이력", "장기미수"]:
-                    if sheet in xls.sheet_names:
-                        raw = pd.read_excel(xls, sheet_name=sheet, header=1)
-                        frames.append(raw)
-                if not frames:
+                if "이력" not in xls.sheet_names:
                     st.error("'이력' 시트를 찾지 못했습니다.")
                     st.stop()
-                raw_df = pd.concat(frames, ignore_index=True)
+                raw_df = pd.read_excel(xls, sheet_name="이력", header=1)
                 raw_df.columns = [str(c).strip() for c in raw_df.columns]
 
                 col_map = {
