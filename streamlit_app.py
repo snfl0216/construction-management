@@ -918,7 +918,7 @@ with tab_risk:
                 reasons.append(f"{delay_days}일 지연")
             risk_rows.append({
                 "현장명": c["site_name"], "담당자": c["manager"], "채권종류": c["claim_type"],
-                "청구금액": c["claim_amount"], "입금예정일": c["current_due_date"],
+                "청구금액": c["claim_amount"], "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
                 "지연횟수": delay_count, "지연일수": delay_days, "등급": SEVERITY_LABEL[sev], "_sev": sev,
                 "사유": ", ".join(reasons),
             })
@@ -927,21 +927,15 @@ with tab_risk:
             st.success("현재 리스크 현장이 없습니다. 👍")
         else:
             risk_df = pd.DataFrame(risk_rows)
-            site_sev = risk_df.groupby("현장명")["_sev"].max().reset_index().rename(columns={"_sev": "현장등급"})
-            site_sev["현장등급"] = site_sev["현장등급"].map(SEVERITY_LABEL)
 
             c1, c2, c3 = st.columns(3)
-            c1.metric("리스크 현장 수", f"{site_sev['현장명'].nunique()}개")
+            c1.metric("리스크 현장 수", f"{risk_df['현장명'].nunique()}개")
             c2.metric("심각 등급 현장", f"{(risk_df.groupby('현장명')['_sev'].max() == 3).sum()}개")
             c3.metric("리스크 청구 건수", f"{len(risk_df)}건")
 
             st.divider()
-            st.markdown("#### 현장별 등급 요약")
-            render_html_table(site_sev.sort_values("현장등급", ascending=False), left_cols=[])
-
-            st.divider()
             st.markdown("#### 리스크 청구 상세")
-            display_risk = risk_df.drop(columns=["_sev"]).sort_values("지연일수", ascending=False)
+            display_risk = risk_df.sort_values(["_sev", "지연일수"], ascending=[False, False]).drop(columns=["_sev"])
             render_html_table(display_risk, money_cols=["청구금액"])
             st.download_button("📥 CSV 다운로드", display_risk.to_csv(index=False).encode("utf-8-sig"),
                                 file_name=f"리스크현장_{date.today()}.csv", mime="text/csv")
