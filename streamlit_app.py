@@ -610,7 +610,8 @@ with tab_progress:
                                 file_name=f"기성청구현황_현장별_{date.today()}.csv", mime="text/csv")
 
         else:  # 담당자별
-            managers = sorted(claim_df_all["담당자"].dropna().unique().tolist())
+            managers = sorted(m for m in claim_df_all["담당자"].dropna().unique().tolist()
+                               if str(m).strip() and str(m).strip().lower() != "nan")
             rows = []
             for m in managers:
                 mc = claim_df_all[claim_df_all["담당자"] == m]
@@ -639,6 +640,7 @@ with tab_progress:
 
             st.markdown("**1. 청구현황** (채권종류별 전체 건수·금액)")
             t1 = mc.groupby("채권종류").agg(건수=("id", "count"), 금액=("청구금액", "sum")).reset_index()
+            t1 = pd.concat([t1, pd.DataFrame([{"채권종류": "합계", "건수": t1["건수"].sum(), "금액": t1["금액"].sum()}])], ignore_index=True)
             render_html_table(t1, money_cols=["금액"], left_cols=[])
 
             st.markdown("**2. 미수현황** (채권종류별 미수 건수·금액)")
@@ -647,6 +649,7 @@ with tab_progress:
                 st.caption("미수 없음")
             else:
                 t2 = mc_unpaid.groupby("채권종류").agg(건수=("id", "count"), 미수금액=("미수잔액", "sum")).reset_index()
+                t2 = pd.concat([t2, pd.DataFrame([{"채권종류": "합계", "건수": t2["건수"].sum(), "미수금액": t2["미수금액"].sum()}])], ignore_index=True)
                 render_html_table(t2, money_cols=["미수금액"], left_cols=[])
 
             st.markdown("**3. 지연현황** (채권종류별 지연 건수·총지연일수)")
@@ -655,6 +658,7 @@ with tab_progress:
                 st.caption("지연 이력 없음")
             else:
                 t3 = mc_delayed.groupby("채권종류").agg(건수=("id", "count"), 총지연일수=("총지연일수", "sum")).reset_index()
+                t3 = pd.concat([t3, pd.DataFrame([{"채권종류": "합계", "건수": t3["건수"].sum(), "총지연일수": t3["총지연일수"].sum()}])], ignore_index=True)
                 render_html_table(t3, money_cols=[], left_cols=[])
 
 # ==========================================================================
@@ -1054,9 +1058,12 @@ with tab_admin:
                             grp = grp.sort_values("_due_sort", na_position="last")
                             first, last = grp.iloc[0], grp.iloc[-1]
                             site_name = str(first.get("site_name", "")).strip()
-                            company_name_v = str(first.get("company_name", "") or "")
-                            manager = str(first.get("manager", "") or "")
-                            claim_type_v = str(last.get("claim_type", "") or "기성금")
+                            company_raw = first.get("company_name", "")
+                            company_name_v = "" if pd.isna(company_raw) else str(company_raw).strip()
+                            manager_raw = first.get("manager", "")
+                            manager = "" if pd.isna(manager_raw) else str(manager_raw).strip()
+                            claim_type_raw = last.get("claim_type", "")
+                            claim_type_v = "기성금" if pd.isna(claim_type_raw) else (str(claim_type_raw).strip() or "기성금")
                             claim_amount = parse_amount(last.get("claim_amount", 0))
                             orig_due = safe_date(first.get("original_due_date")) or safe_date(first.get("current_due_date"))
                             orig_due_str = orig_due.isoformat() if orig_due else None
