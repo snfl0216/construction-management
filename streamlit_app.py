@@ -465,6 +465,13 @@ with tab_receivable:
             prev_div = cur_div
         flush_subtotal(prev_div, group_rows)
 
+        grand_total = {c: "" for c in cols}
+        grand_total["번호"] = f"총 {len(show_df)}개 현장"
+        grand_total["총계약금액"] = show_df["총계약금액"].sum()
+        grand_total["총입금액"] = show_df["총입금액"].sum()
+        grand_total["미수잔액"] = show_df["미수잔액"].sum()
+        rows_with_subtotal.append(grand_total)
+
         show_df_final = pd.DataFrame(rows_with_subtotal)[cols]
         render_html_table(show_df_final, money_cols=["총계약금액", "총입금액", "미수잔액"],
                            col_max_width={"비고": "120px"})
@@ -577,11 +584,6 @@ with tab_progress:
             if manager_filter != "전체":
                 disp = disp[disp["담당자"] == manager_filter]
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("총 청구금액 합계", f"{disp['청구금액'].sum():,} 원")
-            m2.metric("총 입금액 합계", f"{disp['입금액'].sum():,} 원")
-            m3.metric("총 미수잔액 합계", f"{disp['미수잔액'].sum():,} 원")
-
             disp = disp.assign(_sort=pd.to_datetime(disp["최초예정일"], errors="coerce")).sort_values("_sort", na_position="last")
 
             def colorize_status(s):
@@ -591,8 +593,17 @@ with tab_progress:
                     return f"<span style='color:#b7950b;font-weight:600;'>{s}</span>"
                 return s
 
-            show = disp[["현장명", "담당자", "채권종류", "최초예정일", "입금예정일", "청구금액", "입금액", "미수잔액", "지연횟수", "총지연일수", "상태"]]
-            show_display = show.copy()
+            cols_bysite = ["현장명", "담당자", "채권종류", "최초예정일", "입금예정일", "청구금액", "입금액", "미수잔액", "지연횟수", "총지연일수", "상태"]
+            show = disp[cols_bysite]
+
+            total_row = {c: "" for c in cols_bysite}
+            total_row["현장명"] = f"총 {len(show)}건"
+            total_row["청구금액"] = show["청구금액"].sum()
+            total_row["입금액"] = show["입금액"].sum()
+            total_row["미수잔액"] = show["미수잔액"].sum()
+            show_with_total = pd.concat([show, pd.DataFrame([total_row])], ignore_index=True)
+
+            show_display = show_with_total.copy()
             show_display["상태"] = show_display["상태"].apply(colorize_status)
             render_html_table(show_display, money_cols=["청구금액", "입금액", "미수잔액"])
             st.download_button("📥 CSV 다운로드", show.to_csv(index=False).encode("utf-8-sig"),
