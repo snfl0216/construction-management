@@ -354,6 +354,7 @@ tab_receivable, tab_progress, tab_calendar, tab_risk, tab_contract, tab_admin = 
 # ==========================================================================
 with tab_receivable:
     st.subheader("📋 현장별 미수현황")
+    st.caption("미수 잔액이 있는 현장 리스트입니다. (완납되면 목록에서 빠집니다)")
     with engine.connect() as conn:
         sr_df = pd.read_sql("SELECT * FROM site_receivables ORDER BY contract_date;", conn)
 
@@ -527,6 +528,7 @@ with tab_receivable:
 # ==========================================================================
 with tab_progress:
     st.subheader("📊 기성청구현황")
+    st.caption("일일수금관리 기준 기성 청구 현황입니다. 현장별·담당자별로 입금예정일, 지연 여부 등을 확인할 수 있습니다.")
     view_mode = st.radio("보기 기준", ["현장별", "담당자별"], horizontal=True)
     st.divider()
 
@@ -554,6 +556,7 @@ with tab_progress:
             delay_days = calc_delay_days(c["original_due_date"], ref_date) if c["status"] != "확인필요" else 0
             claim_rows.append({
                 "id": cid, "현장명": c["site_name"], "담당자": c["manager"], "채권종류": c["claim_type"],
+                "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
                 "청구금액": c["claim_amount"], "입금액": paid, "미수잔액": unpaid,
                 "지연횟수": delay_count, "총지연일수": delay_days,
                 "상태": display_status(c["status"], c["current_due_date"], today),
@@ -570,7 +573,8 @@ with tab_progress:
                 disp = disp[disp["현장명"] == site_filter]
             if type_filter != "전체":
                 disp = disp[disp["채권종류"] == type_filter]
-            show = disp[["현장명", "담당자", "채권종류", "청구금액", "입금액", "미수잔액", "지연횟수", "총지연일수", "상태"]]
+            disp = disp.assign(_sort=pd.to_datetime(disp["최초예정일"], errors="coerce")).sort_values("_sort", na_position="last")
+            show = disp[["현장명", "담당자", "채권종류", "최초예정일", "입금예정일", "청구금액", "입금액", "미수잔액", "지연횟수", "총지연일수", "상태"]]
             render_html_table(show, money_cols=["청구금액", "입금액", "미수잔액"])
             st.download_button("📥 CSV 다운로드", show.to_csv(index=False).encode("utf-8-sig"),
                                 file_name=f"기성청구현황_현장별_{date.today()}.csv", mime="text/csv")
@@ -628,6 +632,7 @@ with tab_progress:
 # ==========================================================================
 with tab_calendar:
     st.subheader("📅 입금 캘린더")
+    st.caption("기성 청구된 입금예정 건을 달력으로 확인합니다. 완납(초록)·지연(빨강)·입금대기(회색)로 구분됩니다.")
     with engine.connect() as conn:
         claims_df = pd.read_sql(
             "SELECT * FROM claims WHERE (current_due_date IS NOT NULL AND current_due_date != '') "
