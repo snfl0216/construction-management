@@ -952,25 +952,29 @@ with tab_contract:
         st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '현장별 미수관리' 엑셀을 업로드해주세요.")
     else:
         LABEL_MAP = {
-            "총 계약금": "총계약금", "서울": "서울계약", "대구": "대구계약", "대리점": "대리점계약",
-            "총 현장수": "현장수", "서울현장수": "서울현장수", "대구현장수": "대구현장수", "대리점현장수": "대리점현장수",
+            "총 계약금": "총계약금", "서울": "서울계약", "대구": "대구계약", "대리점": "대리점계약", "해외": "해외계약",
+            "총 현장수": "현장수", "서울현장수": "서울현장수", "대구현장수": "대구현장수",
+            "대리점현장수": "대리점현장수", "해외현장수": "해외현장수",
         }
         cs_df = cs_df[cs_df["label"].isin(LABEL_MAP.keys())].copy()
         cs_df["label"] = cs_df["label"].map(LABEL_MAP)
 
+        SITE_COUNT_COLS = ["현장수", "서울현장수", "대구현장수", "대리점현장수", "해외현장수"]
+
         yearly = cs_df.pivot_table(index="year", columns="label", values="total", aggfunc="first").reset_index()
         yearly = yearly.rename(columns={"year": "연도"})
         yearly["연도"] = yearly["연도"].astype(int)
-        col_order = ["연도", "총계약금", "현장수", "서울계약", "서울현장수", "대구계약", "대구현장수", "대리점계약", "대리점현장수"]
+        col_order = ["연도", "총계약금", "현장수", "서울계약", "서울현장수", "대구계약", "대구현장수",
+                     "대리점계약", "대리점현장수", "해외계약", "해외현장수"]
         col_order = [c for c in col_order if c in yearly.columns]
         yearly = yearly[col_order].sort_values("연도")
-        for c in ["현장수", "서울현장수", "대구현장수", "대리점현장수"]:
+        for c in SITE_COUNT_COLS:
             if c in yearly.columns:
                 yearly[c] = yearly[c].fillna(0).astype(int)
 
         money_cols = [c for c in yearly.columns if "계약" in c]
         render_html_table(yearly, money_cols=money_cols, left_cols=[], fixed_layout=True,
-                           narrow_cols=["현장수", "서울현장수", "대구현장수", "대리점현장수"])
+                           narrow_cols=SITE_COUNT_COLS)
 
         st.divider()
         sel_year = st.selectbox("월별로 보기", sorted(cs_df["year"].unique().tolist(), reverse=True))
@@ -978,15 +982,16 @@ with tab_contract:
         y_df = cs_df[cs_df["year"] == sel_year].set_index("label")[month_cols].T
         y_df.index = range(1, 13)
         y_df = y_df.reset_index().rename(columns={"index": "월"})
-        col_order_m = ["월", "총계약금", "현장수", "서울계약", "서울현장수", "대구계약", "대구현장수", "대리점계약", "대리점현장수"]
+        col_order_m = ["월", "총계약금", "현장수", "서울계약", "서울현장수", "대구계약", "대구현장수",
+                       "대리점계약", "대리점현장수", "해외계약", "해외현장수"]
         col_order_m = [c for c in col_order_m if c in y_df.columns]
         y_df = y_df[col_order_m]
-        for c in ["현장수", "서울현장수", "대구현장수", "대리점현장수"]:
+        for c in SITE_COUNT_COLS:
             if c in y_df.columns:
                 y_df[c] = y_df[c].fillna(0).astype(int)
         money_cols_m = [c for c in y_df.columns if "계약" in c]
         render_html_table(y_df, money_cols=money_cols_m, left_cols=[], fixed_layout=True,
-                           narrow_cols=["현장수", "서울현장수", "대구현장수", "대리점현장수"])
+                           narrow_cols=SITE_COUNT_COLS)
 
         st.download_button("📥 연도별 CSV 다운로드", yearly.to_csv(index=False).encode("utf-8-sig"),
                             file_name=f"계약현황_연도별_{date.today()}.csv", mime="text/csv")
@@ -1202,8 +1207,8 @@ with tab_admin:
                     n_status_rows = 0
                     if "계약현황" in wb.sheetnames:
                         ws_cs = wb["계약현황"]
-                        KEEP_LABELS = ("총 계약금", "서울", "대구", "대리점",
-                                       "총 현장수", "서울현장수", "대구현장수", "대리점현장수")
+                        KEEP_LABELS = ("총 계약금", "서울", "대구", "대리점", "해외",
+                                       "총 현장수", "서울현장수", "대구현장수", "대리점현장수", "해외현장수")
                         for row in ws_cs.iter_rows(min_row=1, values_only=True):
                             if len(row) < 16:
                                 continue
