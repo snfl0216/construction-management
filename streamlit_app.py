@@ -230,6 +230,7 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, n
         return str(v)
 
     layout_style = "table-layout:fixed;" if fixed_layout else ""
+    min_width_style = f"min-width:{max(80, len(d.columns) * 80)}px;" if fixed_layout else ""
     colgroup = ""
     if fixed_layout and narrow_cols:
         n_narrow = sum(1 for c in d.columns if c in narrow_cols)
@@ -240,7 +241,7 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, n
             f"<col style='width:{narrow_w if c in narrow_cols else normal_w}%'>" for c in d.columns
         ) + "</colgroup>"
 
-    html = f"<div style='overflow-x:auto;'><table style='width:100%;{layout_style}border-collapse:collapse;font-size:13px;'>{colgroup}"
+    html = f"<div style='overflow-x:auto;'><table style='width:100%;{layout_style}{min_width_style}border-collapse:collapse;font-size:13px;'>{colgroup}"
     html += "<thead><tr>"
     for col in d.columns:
         mw = f"max-width:{col_max_width[col]};" if col in col_max_width else ""
