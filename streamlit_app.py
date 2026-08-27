@@ -248,7 +248,15 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, n
         html += (f"<th style='padding:0;border-bottom:2px solid #ddd;background:#fafafa;'>"
                   f"<div style='padding:6px 10px;text-align:center;{wrap_style}{mw}' title='{col}'>{col}</div></th>")
     html += "</tr></thead><tbody>"
+
+    def is_total_row(row):
+        for v in row.values:
+            if isinstance(v, str) and ("합계" in v or "소계" in v or v.strip().startswith("총 ")):
+                return True
+        return False
+
     for _, row in d.iterrows():
+        row_bold = is_total_row(row)
         html += "<tr>"
         for col in d.columns:
             val = row[col]
@@ -265,8 +273,9 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, n
             mw = f"max-width:{col_max_width[col]};" if col in col_max_width else ""
             wrap_style = "white-space:normal;overflow:visible;text-overflow:clip;" if col in wrap_cols else "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
             title_attr = "" if (has_html or col in wrap_cols) else f" title='{val_disp}'"
+            bold_style = "font-weight:700;" if row_bold else ""
             html += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
-                      f"<div style='padding:5px 10px;text-align:{align};{wrap_style}{mw}'{title_attr}>{val_disp}</div></td>")
+                      f"<div style='padding:5px 10px;text-align:{align};{wrap_style}{mw}{bold_style}'{title_attr}>{val_disp}</div></td>")
         html += "</tr>"
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
