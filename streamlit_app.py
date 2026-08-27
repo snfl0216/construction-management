@@ -245,9 +245,8 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, n
     html += "<thead><tr>"
     for col in d.columns:
         mw = f"max-width:{col_max_width[col]};" if col in col_max_width else ""
-        wrap_style = "white-space:normal;overflow:visible;text-overflow:clip;" if col in wrap_cols else "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
         html += (f"<th style='padding:0;border-bottom:2px solid #ddd;background:#fafafa;'>"
-                  f"<div style='padding:6px 10px;text-align:center;{wrap_style}{mw}' title='{col}'>{col}</div></th>")
+                  f"<div style='padding:6px 6px;text-align:center;white-space:normal;overflow-wrap:break-word;line-height:1.25;{mw}'>{col}</div></th>")
     html += "</tr></thead><tbody>"
 
     def is_total_row(row):
