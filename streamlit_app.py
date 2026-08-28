@@ -996,6 +996,42 @@ with tab_contract:
         st.download_button("📥 연도별 CSV 다운로드", yearly.to_csv(index=False).encode("utf-8-sig"),
                             file_name=f"계약현황_연도별_{date.today()}.csv", mime="text/csv")
 
+        st.divider()
+        st.markdown("## 📊 기간별 전년대비 비교")
+        st.caption("예: 1~6월을 고르면, 매년 1~6월 누적 계약금액·현장수를 한눈에 비교하고 전년대비 증감을 보여줍니다.")
+
+        pc1, pc2 = st.columns(2)
+        m_start = pc1.selectbox("시작월", list(range(1, 13)), index=0)
+        m_end = pc2.selectbox("종료월", list(range(1, 13)), index=today.month - 1 if today.month >= 1 else 5)
+        if m_start > m_end:
+            st.warning("시작월이 종료월보다 늦습니다. 순서를 바꿔주세요.")
+        else:
+            months_in_range = [f"m{i}" for i in range(m_start, m_end + 1)]
+            years_all = sorted(cs_df["year"].unique().tolist())
+            comp_rows = []
+            for yr_c in years_all:
+                yr_data = cs_df[cs_df["year"] == yr_c]
+                total_amt = 0
+                site_cnt = 0
+                for _, r in yr_data.iterrows():
+                    vals = [r[m] for m in months_in_range if pd.notna(r[m])]
+                    if r["label"] == "총계약금":
+                        total_amt = sum(vals)
+                    elif r["label"] == "현장수":
+                        site_cnt = int(sum(vals))
+                comp_rows.append({"연도": yr_c, f"{m_start}~{m_end}월 누적계약금액": total_amt, "현장수": site_cnt})
+
+            comp_df = pd.DataFrame(comp_rows).sort_values("연도")
+            amt_col = f"{m_start}~{m_end}월 누적계약금액"
+            comp_df["전년대비 증감액"] = comp_df[amt_col].diff()
+            comp_df["전년대비 증감률(%)"] = (comp_df[amt_col].pct_change() * 100).round(1)
+            comp_df["전년대비 증감액"] = comp_df["전년대비 증감액"].fillna(0).astype(int)
+            comp_df["전년대비 증감률(%)"] = comp_df["전년대비 증감률(%)"].fillna(0)
+
+            render_html_table(comp_df, money_cols=[amt_col, "전년대비 증감액"], left_cols=[])
+
+            st.bar_chart(comp_df.set_index("연도")[amt_col])
+
 # ==========================================================================
 # TAB: 관리자 — 엑셀 업로드 2개만
 # ==========================================================================
