@@ -1054,17 +1054,16 @@ with tab_contract:
 
             bar_chart = (
                 alt.Chart(chart_data)
-                .mark_bar(size=28, color="#4C78A8")
+                .mark_bar(size=28, color="#4C78A8", tooltip=False)
                 .encode(
                     x=alt.X("연도:N", sort=None, title="연도", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y(f"{amt_col}:Q", title="금액(억원)",
                             axis=alt.Axis(labelExpr=axis_expr, values=tick_values, labelOverlap=False)),
-                    tooltip=["연도", alt.Tooltip("억원표시:N", title="누적계약금액")],
                 )
             )
             right_axis_layer = (
                 alt.Chart(chart_data)
-                .mark_bar(size=28, opacity=0)
+                .mark_bar(size=28, opacity=0, tooltip=False)
                 .encode(
                     x=alt.X("연도:N", sort=None),
                     y=alt.Y(f"{amt_col}:Q", title=None,
@@ -1075,7 +1074,7 @@ with tab_contract:
                 alt.layer(bar_chart, right_axis_layer)
                 .resolve_scale(y="shared")
                 .resolve_axis(y="independent")
-                .properties(height=420)
+                .properties(height=630)
             )
             st.altair_chart(combined_chart, use_container_width=True)
 
