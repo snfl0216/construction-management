@@ -1037,7 +1037,7 @@ with tab_contract:
             amt_col = "누적계약금액"
             comp_df["전년대비 증감액"] = comp_df[amt_col].diff()
             raw_pct = comp_df[amt_col].pct_change() * 100
-            raw_pct = raw_pct.replace([float("inf"), float("-inf")], pd.NA)  # 전년도 값이 0이면 증감률 계산 불가 -> 공란
+            raw_pct = raw_pct.replace([float("inf"), float("-inf")], float("nan"))  # 전년도 값이 0이면 증감률 계산 불가 -> 공란
             comp_df["전년대비 증감률(%)"] = raw_pct.round(1)
             comp_df["전년대비 증감액"] = comp_df["전년대비 증감액"].fillna(0).astype(int)
 
@@ -1045,6 +1045,7 @@ with tab_contract:
 
             chart_data = comp_df[["연도", amt_col]].copy()
             chart_data["연도"] = chart_data["연도"].astype(str)
+            chart_data["억원표시"] = (chart_data[amt_col] / 1e8).round(0).astype(int).astype(str) + "억"
             axis_expr = "format(datum.value/100000000, ',.0f') + '억'"
             UNIT = 1_000_000_000  # 10억
             max_val = float(chart_data[amt_col].max()) if not chart_data.empty else 0
@@ -1057,8 +1058,8 @@ with tab_contract:
                 .encode(
                     x=alt.X("연도:N", sort=None, title="연도", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y(f"{amt_col}:Q", title="금액(억원)",
-                            axis=alt.Axis(labelExpr=axis_expr, values=tick_values)),
-                    tooltip=["연도", alt.Tooltip(f"{amt_col}:Q", format=",.0f")],
+                            axis=alt.Axis(labelExpr=axis_expr, values=tick_values, labelOverlap=False)),
+                    tooltip=["연도", alt.Tooltip("억원표시:N", title="누적계약금액")],
                 )
             )
             right_axis_layer = (
@@ -1067,14 +1068,14 @@ with tab_contract:
                 .encode(
                     x=alt.X("연도:N", sort=None),
                     y=alt.Y(f"{amt_col}:Q", title=None,
-                            axis=alt.Axis(orient="right", labelExpr=axis_expr, values=tick_values)),
+                            axis=alt.Axis(orient="right", labelExpr=axis_expr, values=tick_values, labelOverlap=False)),
                 )
             )
             combined_chart = (
                 alt.layer(bar_chart, right_axis_layer)
                 .resolve_scale(y="shared")
                 .resolve_axis(y="independent")
-                .properties(height=320)
+                .properties(height=420)
             )
             st.altair_chart(combined_chart, use_container_width=True)
 
