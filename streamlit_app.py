@@ -999,7 +999,7 @@ with tab_contract:
 
         st.divider()
         st.markdown("## 📊 기간별 전년대비 비교")
-        st.caption("예: 시작월 1, 종료월 6을 고르면 매년 1월부터 6월까지 누적 계약금액과 현장수를 비교하고, 전년대비 증감을 보여줍니다.")
+        st.caption("시작월, 종료월을 고르면 매년 기간별 누적 계약금액과 현장수를 비교하고, 전년대비 증감을 보여줍니다.")
 
         pc1, pc2, pc3 = st.columns(3)
         m_start = pc1.selectbox("시작월", list(range(1, 13)), index=0)
@@ -1036,9 +1036,10 @@ with tab_contract:
             comp_df = pd.DataFrame(comp_rows).sort_values("연도")
             amt_col = "누적계약금액"
             comp_df["전년대비 증감액"] = comp_df[amt_col].diff()
-            comp_df["전년대비 증감률(%)"] = (comp_df[amt_col].pct_change() * 100).round(1)
+            raw_pct = comp_df[amt_col].pct_change() * 100
+            raw_pct = raw_pct.replace([float("inf"), float("-inf")], pd.NA)  # 전년도 값이 0이면 증감률 계산 불가 -> 공란
+            comp_df["전년대비 증감률(%)"] = raw_pct.round(1)
             comp_df["전년대비 증감액"] = comp_df["전년대비 증감액"].fillna(0).astype(int)
-            comp_df["전년대비 증감률(%)"] = comp_df["전년대비 증감률(%)"].fillna(0)
 
             render_html_table(comp_df, money_cols=[amt_col, "전년대비 증감액"], left_cols=[])
 
@@ -1064,7 +1065,12 @@ with tab_contract:
                             axis=alt.Axis(orient="right", labelExpr=axis_expr, tickMinStep=1000000000)),
                 )
             )
-            combined_chart = alt.layer(bar_chart, right_axis_layer).resolve_scale(y="shared").properties(height=320)
+            combined_chart = (
+                alt.layer(bar_chart, right_axis_layer)
+                .resolve_scale(y="shared")
+                .resolve_axis(y="independent")
+                .properties(height=320)
+            )
             st.altair_chart(combined_chart, use_container_width=True)
 
 
