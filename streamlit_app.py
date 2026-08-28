@@ -1008,10 +1008,10 @@ with tab_contract:
         region_filter = pc3.selectbox("지역 필터", region_options)
         REGION_LABEL_MAP = {
             "전체": ("총계약금", "현장수"),
-            "서울": ("서울", "서울현장수"),
-            "대구": ("대구", "대구현장수"),
-            "대리점": ("대리점", "대리점현장수"),
-            "해외": ("해외", "해외현장수"),
+            "서울": ("서울계약", "서울현장수"),
+            "대구": ("대구계약", "대구현장수"),
+            "대리점": ("대리점계약", "대리점현장수"),
+            "해외": ("해외계약", "해외현장수"),
         }
 
         if m_start > m_end:
@@ -1049,7 +1049,8 @@ with tab_contract:
                 .mark_bar(size=28, color="#4C78A8")
                 .encode(
                     x=alt.X("연도:N", sort=None, title="연도", axis=alt.Axis(labelAngle=0)),
-                    y=alt.Y(f"{amt_col}:Q", title="금액(원)"),
+                    y=alt.Y(f"{amt_col}:Q", title="금액(억원)",
+                            axis=alt.Axis(labelExpr="format(datum.value/100000000, ',.0f') + '억'")),
                     tooltip=["연도", alt.Tooltip(f"{amt_col}:Q", format=",.0f")],
                 )
                 .properties(height=320)
