@@ -374,7 +374,7 @@ with tab_receivable:
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("활성 현장 수", f"{len(active_df)}개")
-        c2.metric("총 계약금액(부가세 포함)", f"{(active_df['contract_amount']+active_df['change_amount']).sum():,} 원")
+        c2.metric("총 계약금액(부가세 포함)", f"{active_df['contract_amount'].sum():,} 원")
         c3.metric("총 입금액(부가세 포함)", f"{active_df['total_paid'].sum():,} 원")
         c4.metric("총 미수잔액(부가세 포함)", f"{active_df['unpaid_balance'].sum():,} 원")
 
@@ -496,7 +496,7 @@ with tab_receivable:
                 "현장명": row["site_name"], "업체명": row["company_name"],
                 "계약일": row["contract_date"] or "-", "준공일": row["completion_date"] or "-",
                 "착공일": row["start_date"] or "-",
-                "총계약금(변경포함)": row["contract_amount"] + row["change_amount"],
+                "총계약금(변경포함)": row["contract_amount"],
                 "변경계약": row["change_amount"], "미수잔액": row["unpaid_balance"],
                 "공정율(%)": round(row["progress_rate"] * 100), "기성율(%)": round(row["invoice_progress_rate"] * 100),
                 "담당자": row["manager"],
