@@ -1002,7 +1002,7 @@ with tab_contract:
 
         pc1, pc2 = st.columns(2)
         m_start = pc1.selectbox("시작월", list(range(1, 13)), index=0)
-        m_end = pc2.selectbox("종료월", list(range(1, 13)), index=today.month - 1 if today.month >= 1 else 5)
+        m_end = pc2.selectbox("종료월", list(range(1, 13)), index=date.today().month - 1)
         if m_start > m_end:
             st.warning("시작월이 종료월보다 늦습니다. 순서를 바꿔주세요.")
         else:
