@@ -1,6 +1,7 @@
 import streamlit as st
 from sqlalchemy import create_engine, text
 import pandas as pd
+import altair as alt
 from datetime import datetime, date
 import io
 import calendar as pycal
@@ -998,14 +999,25 @@ with tab_contract:
 
         st.divider()
         st.markdown("## 📊 기간별 전년대비 비교")
-        st.caption("예: 1~6월을 고르면, 매년 1~6월 누적 계약금액·현장수를 한눈에 비교하고 전년대비 증감을 보여줍니다.")
+        st.caption("예: 시작월 1, 종료월 6을 고르면 매년 1월부터 6월까지 누적 계약금액과 현장수를 비교하고, 전년대비 증감을 보여줍니다.")
 
-        pc1, pc2 = st.columns(2)
+        pc1, pc2, pc3 = st.columns(3)
         m_start = pc1.selectbox("시작월", list(range(1, 13)), index=0)
         m_end = pc2.selectbox("종료월", list(range(1, 13)), index=date.today().month - 1)
+        region_options = ["전체", "서울", "대구", "대리점", "해외"]
+        region_filter = pc3.selectbox("지역 필터", region_options)
+        REGION_LABEL_MAP = {
+            "전체": ("총계약금", "현장수"),
+            "서울": ("서울", "서울현장수"),
+            "대구": ("대구", "대구현장수"),
+            "대리점": ("대리점", "대리점현장수"),
+            "해외": ("해외", "해외현장수"),
+        }
+
         if m_start > m_end:
             st.warning("시작월이 종료월보다 늦습니다. 순서를 바꿔주세요.")
         else:
+            amt_label, cnt_label = REGION_LABEL_MAP[region_filter]
             months_in_range = [f"m{i}" for i in range(m_start, m_end + 1)]
             years_all = sorted(cs_df["year"].unique().tolist())
             comp_rows = []
@@ -1015,14 +1027,14 @@ with tab_contract:
                 site_cnt = 0
                 for _, r in yr_data.iterrows():
                     vals = [r[m] for m in months_in_range if pd.notna(r[m])]
-                    if r["label"] == "총계약금":
+                    if r["label"] == amt_label:
                         total_amt = sum(vals)
-                    elif r["label"] == "현장수":
+                    elif r["label"] == cnt_label:
                         site_cnt = int(sum(vals))
-                comp_rows.append({"연도": yr_c, f"{m_start}~{m_end}월 누적계약금액": total_amt, "현장수": site_cnt})
+                comp_rows.append({"연도": yr_c, "누적계약금액": total_amt, "현장수": site_cnt})
 
             comp_df = pd.DataFrame(comp_rows).sort_values("연도")
-            amt_col = f"{m_start}~{m_end}월 누적계약금액"
+            amt_col = "누적계약금액"
             comp_df["전년대비 증감액"] = comp_df[amt_col].diff()
             comp_df["전년대비 증감률(%)"] = (comp_df[amt_col].pct_change() * 100).round(1)
             comp_df["전년대비 증감액"] = comp_df["전년대비 증감액"].fillna(0).astype(int)
@@ -1030,7 +1042,21 @@ with tab_contract:
 
             render_html_table(comp_df, money_cols=[amt_col, "전년대비 증감액"], left_cols=[])
 
-            st.bar_chart(comp_df.set_index("연도")[amt_col])
+            chart_data = comp_df[["연도", amt_col]].copy()
+            chart_data["연도"] = chart_data["연도"].astype(str)
+            bar_chart = (
+                alt.Chart(chart_data)
+                .mark_bar(size=28, color="#4C78A8")
+                .encode(
+                    x=alt.X("연도:N", sort=None, title="연도", axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y(f"{amt_col}:Q", title="금액(원)"),
+                    tooltip=["연도", alt.Tooltip(f"{amt_col}:Q", format=",.0f")],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(bar_chart, use_container_width=True)
+
+
 
 # ==========================================================================
 # TAB: 관리자 — 엑셀 업로드 2개만
