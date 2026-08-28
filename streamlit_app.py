@@ -1046,13 +1046,18 @@ with tab_contract:
             chart_data = comp_df[["연도", amt_col]].copy()
             chart_data["연도"] = chart_data["연도"].astype(str)
             axis_expr = "format(datum.value/100000000, ',.0f') + '억'"
+            UNIT = 1_000_000_000  # 10억
+            max_val = float(chart_data[amt_col].max()) if not chart_data.empty else 0
+            n_ticks = int(max_val // UNIT) + 2
+            tick_values = [i * UNIT for i in range(n_ticks)]
+
             bar_chart = (
                 alt.Chart(chart_data)
                 .mark_bar(size=28, color="#4C78A8")
                 .encode(
                     x=alt.X("연도:N", sort=None, title="연도", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y(f"{amt_col}:Q", title="금액(억원)",
-                            axis=alt.Axis(labelExpr=axis_expr, tickMinStep=1000000000)),
+                            axis=alt.Axis(labelExpr=axis_expr, values=tick_values)),
                     tooltip=["연도", alt.Tooltip(f"{amt_col}:Q", format=",.0f")],
                 )
             )
@@ -1062,7 +1067,7 @@ with tab_contract:
                 .encode(
                     x=alt.X("연도:N", sort=None),
                     y=alt.Y(f"{amt_col}:Q", title=None,
-                            axis=alt.Axis(orient="right", labelExpr=axis_expr, tickMinStep=1000000000)),
+                            axis=alt.Axis(orient="right", labelExpr=axis_expr, values=tick_values)),
                 )
             )
             combined_chart = (
