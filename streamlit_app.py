@@ -14,7 +14,13 @@ ADMIN_PASSWORD = "chdan1576**"
 
 CLAIM_TYPES = ["선급금", "기성금", "중도금", "잔금", "추가금", "정산금", "AS", "시공부자재"]
 
-engine = create_engine("sqlite:///construction_v6.db")
+try:
+    _turso_url = st.secrets["TURSO_DATABASE_URL"].replace("libsql://", "")
+    _turso_token = st.secrets["TURSO_AUTH_TOKEN"]
+    engine = create_engine(f"sqlite+libsql://{_turso_url}?authToken={_turso_token}&secure=true")
+except Exception:
+    # Turso 접속 정보가 없으면(로컬 테스트 등) 예전처럼 로컬 파일 DB 사용
+    engine = create_engine("sqlite:///construction_v6.db")
 
 # --------------------------------------------------------------------------
 # DB 초기화 — 두 데이터 파이프라인 완전히 분리
