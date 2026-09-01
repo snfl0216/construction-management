@@ -445,7 +445,7 @@ with tab_receivable:
 
         disp["비고"] = disp.apply(billing_note, axis=1)
         cols = ["번호", "구분", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자", "비고"]
-        DIVISION_ORDER = {"ENC": 0, "필로브": 1, "대리점": 2}
+        DIVISION_ORDER = {"ENC": 0, "필로브": 1, "대리점": 2, "해외": 3}
         show_df = (
             disp.assign(
                 _sortno=filtered_df["no_number"],
@@ -1347,6 +1347,11 @@ with tab_admin:
                             if not contract_date:
                                 contract_date = ym
 
+                            branch_v = r[4] or ""
+                            division_v = r[5] or ""
+                            if branch_v in ("해외", "대리점"):
+                                division_v = branch_v  # 지사가 해외/대리점이면 구분(F열)보다 우선
+
                             res = conn.execute(text("""
                                 INSERT INTO site_receivables
                                 (no_number, division, site_name, company_name, manager, branch, contract_code, contract_date, start_date,
@@ -1355,8 +1360,8 @@ with tab_admin:
                                 VALUES (:no,:div,:sn,:cn,:mg,:br,:cc,:cd,:sd,:ed,:ym,:ca,:cha,:tp,:ub,:pr,:ipr,:iir,:ia,:sl)
                             """), {
                                 "no": int(r[6]) if isinstance(r[6], (int, float)) else None,
-                                "div": r[5] or "",
-                                "sn": r[7], "cn": r[8] or "", "mg": r[24] or "", "br": r[4] or "",
+                                "div": division_v,
+                                "sn": r[7], "cn": r[8] or "", "mg": r[24] or "", "br": branch_v,
                                 "cc": r[3] or "", "cd": contract_date, "sd": to_date_s(r[12]), "ed": to_date_s(r[13]),
                                 "ym": ym,
                                 "ca": to_won_from_thousands(r[16]), "cha": to_won_from_thousands(r[15]),
