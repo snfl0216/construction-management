@@ -15,33 +15,19 @@ ADMIN_PASSWORD = "chdan1576**"
 CLAIM_TYPES = ["선급금", "기성금", "중도금", "잔금", "추가금", "정산금", "AS", "시공부자재"]
 
 @st.cache_resource
-def get_engine_and_status():
-    """DB 연결은 앱이 켜져있는 동안 딱 한 번만 만든다.
-    (버튼 클릭마다 스트림릿이 코드를 처음부터 다시 돌리는데, 매번 새로 연결하면 그 왕복시간이 계속 쌓인다)"""
-    try:
-        pg_url = st.secrets["SUPABASE_DB_URL"]
-        if pg_url.startswith("postgresql://"):
-            pg_url = pg_url.replace("postgresql://", "postgresql+psycopg2://", 1)
-        eng = create_engine(pg_url, connect_args={"options": "-c statement_timeout=60000"})
-        with eng.connect() as _test_conn:
-            _test_conn.execute(text("SELECT 1"))
-        return eng, "supabase", None
-    except Exception as e:
-        # Supabase 접속 실패하면(설정 안 됐거나 오류) 로컬 파일 DB로 대체 — 단, 화면에 표시해서 숨기지 않는다
-        eng = create_engine("sqlite:///construction_v6.db")
-        return eng, "local", str(e)
+def get_engine():
+    """DB 연결은 앱이 켜져있는 동안 딱 한 번만 만든다."""
+    return create_engine("sqlite:///construction_v6.db")
 
 
-engine, _db_status, _db_error = get_engine_and_status()
-
-# id 자동증가 문법이 SQLite(AUTOINCREMENT)와 PostgreSQL(SERIAL)이 서로 달라서, 지금 연결된 DB에 맞춰 고른다
-PK = "SERIAL PRIMARY KEY" if _db_status == "supabase" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+engine = get_engine()
+PK = "INTEGER PRIMARY KEY AUTOINCREMENT"
 
 # --------------------------------------------------------------------------
 # DB 초기화 — 두 데이터 파이프라인 완전히 분리 (이것도 앱 켜져있는 동안 딱 한 번만 실행)
 # --------------------------------------------------------------------------
 @st.cache_resource
-def init_schema(_engine, db_status, pk):
+def init_schema(_engine, pk):
   with _engine.connect() as conn:
     # ===== 일일수금관리(이력) 기준 : 기성청구현황 / 캘린더 / 리스크현장 =====
     conn.execute(text(f"""
@@ -137,29 +123,6 @@ def init_schema(_engine, db_status, pk):
         conn.commit()
     except Exception:
         conn.rollback()
-    # 예전에 이미 만들어진 테이블(특히 Supabase/Postgres)의 금액 컬럼이 INTEGER(최대 21억)로 남아있으면
-    # 21억 넘는 계약금액에서 넘침 오류가 나므로, BIGINT로 강제 승격한다 (SQLite에서는 원래 있으나 마나라 실패해도 무해).
-    # 매번 페이지 열 때마다 다시 시도하면 락 경합으로 앱 전체가 멈출 수 있어서,
-    # 1) 이미 BIGINT면 건너뛰고 2) 락을 오래 못 잡으면 무한정 기다리지 않고 빨리 포기한다.
-    if db_status == "supabase":
-        for tbl, col in [
-            ("claims", "claim_amount"), ("payments", "payment_amount"),
-            ("site_receivables", "contract_amount"), ("site_receivables", "change_amount"),
-            ("site_receivables", "total_paid"), ("site_receivables", "unpaid_balance"),
-            ("site_receivable_details", "amount"), ("claim_checkpoints", "unpaid_balance"),
-        ]:
-            try:
-                already_bigint = conn.execute(text(
-                    "SELECT data_type FROM information_schema.columns "
-                    "WHERE table_name=:t AND column_name=:c"
-                ), {"t": tbl, "c": col}).scalar()
-                if already_bigint == "bigint":
-                    continue
-                conn.execute(text("SET LOCAL lock_timeout = '3s';"))
-                conn.execute(text(f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT;"))
-                conn.commit()
-            except Exception:
-                conn.rollback()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS site_receivable_details (
             id {pk},
@@ -184,7 +147,7 @@ def init_schema(_engine, db_status, pk):
     conn.commit()
 
 
-init_schema(engine, _db_status, PK)
+init_schema(engine, PK)
 
 # --------------------------------------------------------------------------
 # 공용 함수
@@ -425,11 +388,6 @@ _today_str = date.today().isoformat()
 if st.session_state.get("_delay_check_done_for") != _today_str:
     run_daily_delay_check()
     st.session_state["_delay_check_done_for"] = _today_str
-
-if _db_status == "supabase":
-    st.sidebar.success("🟢 DB: Supabase(클라우드) 연결됨")
-else:
-    st.sidebar.error(f"🔴 DB: 로컬(임시) — Supabase 연결 실패\n\n{_db_error}")
 
 st.sidebar.markdown("### 🔐 관리자 로그인")
 pw_input = st.sidebar.text_input("관리자 비밀번호", type="password")
