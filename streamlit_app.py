@@ -376,6 +376,29 @@ def claim_severity(delay_count, delay_days):
 SEVERITY_LABEL = {0: "정상", 1: "🟡 주의", 2: "🟠 경고", 3: "🔴 심각"}
 
 
+# --------------------------------------------------------------------------
+# 조회 캐시 — 안 보이는 탭도 스트림릿이 매번 다시 그리면서 조회를 반복하므로,
+# 짧게(30초) 기억해뒀다가 재사용한다. 업로드 성공 시 clear_data_cache()로 즉시 비운다.
+# --------------------------------------------------------------------------
+@st.cache_data(ttl=30)
+def load_table(_engine, table_name, where_clause=""):
+    return pd.read_sql(f"SELECT * FROM {table_name} {where_clause};", _engine)
+
+
+@st.cache_data(ttl=30)
+def load_site_detail(_engine, site_id):
+    return pd.read_sql(
+        text("SELECT detail_type as 구분, detail_date as 일자, amount as 금액, note as 비고 "
+             "FROM site_receivable_details WHERE site_receivable_id=:sid ORDER BY detail_date;"),
+        _engine, params={"sid": site_id}
+    )
+
+
+def clear_data_cache():
+    load_table.clear()
+    load_site_detail.clear()
+
+
 def run_daily_delay_check():
     today_str = date.today().isoformat()
     with engine.connect() as conn:
@@ -427,8 +450,7 @@ tab_receivable, tab_progress, tab_calendar, tab_risk, tab_contract, tab_admin = 
 with tab_receivable:
     st.subheader("📋 현장별 미수현황")
     st.caption("미수 잔액이 있는 현장 리스트입니다. (완납되면 목록에서 빠집니다)")
-    with engine.connect() as conn:
-        sr_df = pd.read_sql("SELECT * FROM site_receivables ORDER BY contract_date;", conn)
+    sr_df = load_table(engine, "site_receivables", "ORDER BY contract_date")
 
     if sr_df.empty:
         st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '현장별 미수관리' 엑셀을 업로드해주세요.")
@@ -566,12 +588,7 @@ with tab_receivable:
             }])
             render_html_table(summary_df, money_cols=["총계약금(변경포함)", "변경계약", "미수잔액"])
 
-            with engine.connect() as conn:
-                detail_df = pd.read_sql(
-                    text("SELECT detail_type as 구분, detail_date as 일자, amount as 금액, note as 비고 "
-                         "FROM site_receivable_details WHERE site_receivable_id=:sid ORDER BY detail_date;"),
-                    conn, params={"sid": int(row["id"])}
-                )
+            detail_df = load_site_detail(engine, int(row["id"]))
             if detail_df.empty:
                 st.caption("세부내역이 없습니다.")
             else:
@@ -611,10 +628,9 @@ with tab_progress:
     view_mode = st.radio("보기 기준", ["현장별", "담당자별"], horizontal=True)
     st.divider()
 
-    with engine.connect() as conn:
-        claims_df = pd.read_sql("SELECT * FROM claims;", conn)
-        payments_df = pd.read_sql("SELECT * FROM payments;", conn)
-        history_df = pd.read_sql("SELECT * FROM claim_delay_history;", conn)
+    claims_df = load_table(engine, "claims")
+    payments_df = load_table(engine, "payments")
+    history_df = load_table(engine, "claim_delay_history")
 
     if claims_df.empty:
         st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '일일수금관리' 엑셀을 업로드해주세요.")
@@ -744,14 +760,14 @@ with tab_progress:
 with tab_calendar:
     st.subheader("📅 입금 캘린더")
     st.caption("기성 청구된 입금예정 건을 달력으로 확인합니다. 완납(초록)·지연(빨강)·입금대기(회색)로 구분됩니다.")
-    with engine.connect() as conn:
-        claims_df = pd.read_sql(
-            "SELECT * FROM claims WHERE (current_due_date IS NOT NULL AND current_due_date != '') "
-            "OR (original_due_date IS NOT NULL AND original_due_date != '');", conn
-        )
-        history_df = pd.read_sql("SELECT * FROM claim_delay_history;", conn)
-        checkpoints_df = pd.read_sql("SELECT * FROM claim_checkpoints;", conn)
-        payments_df = pd.read_sql("SELECT * FROM payments;", conn)
+    claims_df = load_table(
+        engine, "claims",
+        "WHERE (current_due_date IS NOT NULL AND current_due_date != '') "
+        "OR (original_due_date IS NOT NULL AND original_due_date != '')"
+    )
+    history_df = load_table(engine, "claim_delay_history")
+    checkpoints_df = load_table(engine, "claim_checkpoints")
+    payments_df = load_table(engine, "payments")
 
     if claims_df.empty:
         st.info("데이터가 없습니다.")
@@ -969,9 +985,8 @@ with tab_calendar:
 with tab_risk:
     st.subheader("🚨 리스크 현장")
     st.caption("완납되지 않은 청구 중 지연 3회 이상이거나 지연일수 30일 이상인 건이 있는 현장. (완납 청구는 제외)")
-    with engine.connect() as conn:
-        claims_df = pd.read_sql("SELECT * FROM claims WHERE status != '완납';", conn)
-        history_df = pd.read_sql("SELECT * FROM claim_delay_history;", conn)
+    claims_df = load_table(engine, "claims", "WHERE status != '완납'")
+    history_df = load_table(engine, "claim_delay_history")
 
     if claims_df.empty:
         st.info("데이터가 없습니다.")
@@ -1023,8 +1038,7 @@ with tab_risk:
 # ==========================================================================
 with tab_contract:
     st.subheader("📈 계약현황 (연도별)")
-    with engine.connect() as conn:
-        cs_df = pd.read_sql("SELECT * FROM contract_status_raw;", conn)
+    cs_df = load_table(engine, "contract_status_raw")
 
     if cs_df.empty:
         st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '현장별 미수관리' 엑셀을 업로드해주세요.")
@@ -1327,13 +1341,16 @@ with tab_admin:
                                         "pd": pdate_final.isoformat(), "dd": delay_days,
                                     })
 
-                    # ---- 여기서부터 실제 DB 왕복: claims를 여러 줄짜리 INSERT 하나로 통째로 보내고,
-                    #      id들을 넣은 순서 그대로 한 번에 돌려받는다 (건마다 왕복하던 게 진짜 병목이었음) ----
+                    # ---- 여기서부터 실제 DB 왕복: claims를 200개씩 나눠서 보내고 id를 순서대로 돌려받는다 ----
                     claim_ids = []
-                    if claims_batch:
+                    CHUNK = 200
+                    for chunk_start in range(0, len(claims_batch), CHUNK):
+                        chunk = claims_batch[chunk_start:chunk_start + CHUNK]
+                        if not chunk:
+                            continue
                         value_clauses = []
                         params = {}
-                        for idx, cb in enumerate(claims_batch):
+                        for idx, cb in enumerate(chunk):
                             value_clauses.append(
                                 f"(:sn{idx}, :cn{idx}, :mg{idx}, :ctype{idx}, :cdate{idx}, :odue{idx}, :cdue{idx}, :amt{idx}, :status{idx}, :remark{idx})"
                             )
@@ -1345,9 +1362,17 @@ with tab_admin:
                             RETURNING id
                         """
                         res = conn.execute(text(sql), params)
-                        claim_ids = [row[0] for row in res.fetchall()]
+                        claim_ids.extend(row[0] for row in res.fetchall())
+                        conn.commit()
 
                     # 자식 테이블들은 claim_idx를 실제 claim_id로 치환한 다음, 테이블당 딱 한 번씩만 왕복해서 넣는다
+                    def exec_chunked(sql_text, rows, chunk_size=500):
+                        for start in range(0, len(rows), chunk_size):
+                            chunk = rows[start:start + chunk_size]
+                            if chunk:
+                                conn.execute(text(sql_text), chunk)
+                                conn.commit()
+
                     history_rows = []
                     for h in history_batch:
                         cid = claim_ids[h["claim_idx"]]
@@ -1360,30 +1385,31 @@ with tab_admin:
                                 "cid": cid, "old": h["old"], "new": h["new"], "ddays": h["ddays"],
                             })
                     if history_rows:
-                        auto_rows = [h for h in history_batch if not h.get("event_pay")]
-                        pay_rows = [h for h in history_batch if h.get("event_pay")]
-                        if auto_rows:
-                            conn.execute(text("""
-                                INSERT INTO claim_delay_history (claim_id, event_type, old_due_date, new_due_date, delay_days, reason)
-                                VALUES (:cid, '자동지연', :old, :new, :ddays, '엑셀 이력 가져오기')
-                            """), [{"cid": claim_ids[h["claim_idx"]], "old": h["old"], "new": h["new"], "ddays": h["ddays"]} for h in auto_rows])
-                        if pay_rows:
-                            conn.execute(text("""
-                                INSERT INTO claim_delay_history (claim_id, event_type, payment_date, delay_days, reason)
-                                VALUES (:cid, :etype, :pd, :dd, '엑셀 이력 가져오기')
-                            """), [{"cid": claim_ids[h["claim_idx"]], "etype": h["etype"], "pd": h["pd"], "dd": h["dd"]} for h in pay_rows])
+                        auto_rows = [{"cid": claim_ids[h["claim_idx"]], "old": h["old"], "new": h["new"], "ddays": h["ddays"]}
+                                     for h in history_batch if not h.get("event_pay")]
+                        pay_rows = [{"cid": claim_ids[h["claim_idx"]], "etype": h["etype"], "pd": h["pd"], "dd": h["dd"]}
+                                    for h in history_batch if h.get("event_pay")]
+                        exec_chunked("""
+                            INSERT INTO claim_delay_history (claim_id, event_type, old_due_date, new_due_date, delay_days, reason)
+                            VALUES (:cid, '자동지연', :old, :new, :ddays, '엑셀 이력 가져오기')
+                        """, auto_rows)
+                        exec_chunked("""
+                            INSERT INTO claim_delay_history (claim_id, event_type, payment_date, delay_days, reason)
+                            VALUES (:cid, :etype, :pd, :dd, '엑셀 이력 가져오기')
+                        """, pay_rows)
 
-                    if checkpoint_batch:
-                        conn.execute(text("""
-                            INSERT INTO claim_checkpoints (claim_id, checkpoint_date, remark, unpaid_balance)
-                            VALUES (:cid, :cdate, :remark, :unpaid)
-                        """), [{"cid": claim_ids[c["claim_idx"]], "cdate": c["cdate"], "remark": c["remark"], "unpaid": c["unpaid"]} for c in checkpoint_batch])
+                    exec_chunked("""
+                        INSERT INTO claim_checkpoints (claim_id, checkpoint_date, remark, unpaid_balance)
+                        VALUES (:cid, :cdate, :remark, :unpaid)
+                    """, [{"cid": claim_ids[c["claim_idx"]], "cdate": c["cdate"], "remark": c["remark"], "unpaid": c["unpaid"]} for c in checkpoint_batch])
 
-                    if payment_batch:
-                        conn.execute(text("INSERT INTO payments (claim_id, payment_date, payment_amount) VALUES (:cid,:pd,:pa)"),
-                                     [{"cid": claim_ids[p["claim_idx"]], "pd": p["pd"], "pa": p["pa"]} for p in payment_batch])
+                    exec_chunked(
+                        "INSERT INTO payments (claim_id, payment_date, payment_amount) VALUES (:cid,:pd,:pa)",
+                        [{"cid": claim_ids[p["claim_idx"]], "pd": p["pd"], "pa": p["pa"]} for p in payment_batch]
+                    )
 
                     conn.commit()
+                clear_data_cache()
                 st.success(f"✅ 완료! 청구 {n_claims}건 반영 (기존 데이터는 전부 새 데이터로 갈음됨)")
                 st.rerun()
             except Exception as e:
@@ -1523,12 +1549,17 @@ with tab_admin:
                         else:
                             i += 1
 
-                    # ---- 여기서부터 실제 DB 왕복: 현장을 여러 줄짜리 INSERT 하나로 통째로 보내고 id를 한 번에 받아온다 ----
+                    # ---- 여기서부터 실제 DB 왕복: 현장을 200개씩 묶어서 나눠 보내고 id를 순서대로 받아온다.
+                    #      (한 번에 774개를 다 넣으려다 문장이 너무 커져서 60초 제한에 걸려 실패했었음) ----
                     site_ids = []
-                    if sites_batch:
+                    CHUNK = 200
+                    for chunk_start in range(0, len(sites_batch), CHUNK):
+                        chunk = sites_batch[chunk_start:chunk_start + CHUNK]
+                        if not chunk:
+                            continue
                         value_clauses = []
                         params = {}
-                        for idx, sb in enumerate(sites_batch):
+                        for idx, sb in enumerate(chunk):
                             value_clauses.append(
                                 f"(:no{idx},:div{idx},:sn{idx},:cn{idx},:mg{idx},:br{idx},:cc{idx},:cd{idx},:sd{idx},:ed{idx},"
                                 f":ym{idx},:ca{idx},:cha{idx},:tp{idx},:ub{idx},:pr{idx},:ipr{idx},:iir{idx},:ia{idx},:sl{idx})"
@@ -1544,20 +1575,25 @@ with tab_admin:
                             RETURNING id
                         """
                         res = conn.execute(text(sql), params)
-                        site_ids = [row[0] for row in res.fetchall()]
+                        site_ids.extend(row[0] for row in res.fetchall())
+                        conn.commit()
 
                     details_batch = [
                         {"sid": site_ids[d["site_idx"]], "dtype": d["dtype"], "dt": d["dt"], "amt": d["amt"], "note": d["note"]}
                         for d in details_batch_raw
                     ]
 
-                    if details_batch:
-                        conn.execute(text("""
-                            INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
-                            VALUES (:sid, :dtype, :dt, :amt, :note)
-                        """), details_batch)
+                    for start in range(0, len(details_batch), 500):
+                        chunk = details_batch[start:start + 500]
+                        if chunk:
+                            conn.execute(text("""
+                                INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
+                                VALUES (:sid, :dtype, :dt, :amt, :note)
+                            """), chunk)
+                            conn.commit()
 
                     conn.commit()
+                clear_data_cache()
                 st.success(f"✅ 완료! 현장 {n_sites}개, 계약현황 {n_status_rows}행 반영 (기존 데이터는 전부 새 데이터로 갈음됨)")
                 st.rerun()
             except Exception as e:
