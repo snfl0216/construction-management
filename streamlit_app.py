@@ -452,14 +452,29 @@ if st.session_state.get("_delay_check_done_for") != _today_str:
 
 is_admin = st.session_state.get("is_admin", False)
 
-tab_receivable, tab_progress, tab_calendar, tab_risk, tab_contract, tab_admin = st.tabs([
-    "📋 현장별 미수현황", "📊 기성청구현황", "📅 입금 캘린더", "🚨 리스크 현장", "📈 계약현황", "🔐 관리자"
-])
+PAGES = ["현장별 미수현황", "기성청구현황", "입금 캘린더", "리스크 현장", "계약현황", "관리자"]
+PAGE_ICONS = {
+    "현장별 미수현황": "📋", "기성청구현황": "📊", "입금 캘린더": "📅",
+    "리스크 현장": "🚨", "계약현황": "📈", "관리자": "🔐",
+}
+if "current_page" not in st.session_state:
+    st.session_state.current_page = PAGES[0]
+
+with st.sidebar:
+    st.markdown("### 메뉴")
+    for p in PAGES:
+        is_current = st.session_state.current_page == p
+        if st.button(f"{PAGE_ICONS[p]}  {p}", use_container_width=True,
+                     type="primary" if is_current else "secondary", key=f"nav_{p}"):
+            st.session_state.current_page = p
+            st.rerun()
+
+page = st.session_state.current_page
 
 # ==========================================================================
 # TAB: 현장별 미수현황  (미수내역 엑셀 미러링)
 # ==========================================================================
-with tab_receivable:
+if page == "현장별 미수현황":
     st.subheader("현장별 미수현황")
     st.caption("미수 잔액이 있는 현장 리스트입니다. (완납되면 목록에서 빠집니다)")
     sr_df = load_table(engine, "site_receivables", "ORDER BY contract_date")
@@ -531,9 +546,8 @@ with tab_receivable:
             prog, inv = row["공정율(%)"], row["기성율(%)"]
             if prog < 60 or inv >= prog:
                 return ""
-            if prog >= 80:
-                return "<span style='color:#c0392b;'>잔금 청구 필요</span>"
-            return "<span style='color:#c0392b;'>중도금 청구 필요</span>"
+            label = "잔금 청구 필요" if prog >= 80 else "중도금 청구 필요"
+            return f"<span style='background:#FCEBEB;color:#A32D2D;border-radius:999px;padding:2px 10px;font-size:12px;'>{label}</span>"
 
         disp["비고"] = disp.apply(billing_note, axis=1)
         cols = ["번호", "구분", "현장명", "업체명", "계약일", "총계약금액", "총입금액", "미수잔액", "공정율(%)", "기성율(%)", "담당자", "비고"]
@@ -638,7 +652,7 @@ with tab_receivable:
 # ==========================================================================
 # TAB: 기성청구현황  (일일수금관리=이력 엑셀 기준)
 # ==========================================================================
-with tab_progress:
+elif page == "기성청구현황":
     st.subheader("기성청구현황")
     st.caption("일일수금관리 기준 기성 청구 현황입니다. 현장별·담당자별로 입금예정일, 지연 여부 등을 확인할 수 있습니다.")
     view_mode = st.radio("보기 기준", ["현장별", "담당자별"], horizontal=True)
@@ -700,6 +714,8 @@ with tab_progress:
             disp = disp.assign(_sort=pd.to_datetime(disp["최초예정일"], errors="coerce")).sort_values("_sort", na_position="last")
 
             def colorize_status(s):
+                if not s or (isinstance(s, str) and s.strip() == ""):
+                    return ""
                 if s in ("지연중", "일부입금(지연)"):
                     return f"<span style='background:#FCEBEB;color:#A32D2D;border-radius:999px;padding:2px 10px;font-size:12px;'>{s}</span>"
                 if s == "확인필요":
@@ -777,7 +793,7 @@ with tab_progress:
 # ==========================================================================
 # TAB: 입금 캘린더 (이력 데이터만)
 # ==========================================================================
-with tab_calendar:
+elif page == "입금 캘린더":
     st.subheader("입금 캘린더")
     st.caption("기성 청구된 입금예정 건을 달력으로 확인합니다. 완납(초록)·지연(빨강)·입금대기(회색)로 구분됩니다.")
     claims_df = load_table(
@@ -1002,7 +1018,7 @@ with tab_calendar:
 # ==========================================================================
 # TAB: 리스크 현장 (이력 데이터만)
 # ==========================================================================
-with tab_risk:
+elif page == "리스크 현장":
     st.subheader("리스크 현장")
     st.caption("완납되지 않은 청구 중 지연 3회 이상이거나 지연일수 30일 이상인 건이 있는 현장. (완납 청구는 제외)")
     claims_df = load_table(engine, "claims", "WHERE status != '완납'")
@@ -1072,7 +1088,7 @@ with tab_risk:
 # ==========================================================================
 # TAB: 계약현황 (미수내역 전체 - 활성/완불 구분 없이 계약년월 있는 모든 행)
 # ==========================================================================
-with tab_contract:
+elif page == "계약현황":
     st.subheader("계약현황 (연도별)")
     cs_df = load_table(engine, "contract_status_raw")
 
@@ -1210,7 +1226,7 @@ with tab_contract:
 # ==========================================================================
 # TAB: 관리자 — 엑셀 업로드 2개만
 # ==========================================================================
-with tab_admin:
+elif page == "관리자":
     st.subheader("관리자")
     if not is_admin:
         st.markdown("### 🔒 관리자 로그인")
