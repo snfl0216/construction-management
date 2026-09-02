@@ -334,22 +334,27 @@ def render_html_table(df, money_cols=None, left_cols=None, fixed_layout=False, n
         html += "<tr>"
         for col in d.columns:
             val = row[col]
+            is_negative = False
             if col in money_cols:
                 try:
                     val_disp = f"{int(val):,}"
+                    is_negative = int(val) < 0
                 except (TypeError, ValueError):
                     val_disp = fmt_plain(val)
                 align = "right"
             else:
                 val_disp = fmt_plain(val)
+                if isinstance(val, (int, float)) and not isinstance(val, bool) and not pd.isna(val) and val < 0:
+                    is_negative = True
                 align = "left" if col in left_cols else "center"
             has_html = "<" in val_disp
             mw = f"max-width:{col_max_width[col]};" if col in col_max_width else ""
             wrap_style = "white-space:normal;overflow:visible;text-overflow:clip;" if col in wrap_cols else "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
             title_attr = "" if (has_html or col in wrap_cols) else f" title='{val_disp}'"
             bold_style = "font-weight:700;" if row_bold else ""
+            color_style = "color:#A32D2D;" if is_negative else ""
             html += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
-                      f"<div style='padding:5px 10px;text-align:{align};{wrap_style}{mw}{bold_style}'{title_attr}>{val_disp}</div></td>")
+                      f"<div style='padding:5px 10px;text-align:{align};{wrap_style}{mw}{bold_style}{color_style}'{title_attr}>{val_disp}</div></td>")
         html += "</tr>"
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
@@ -445,14 +450,7 @@ if st.session_state.get("_delay_check_done_for") != _today_str:
     run_daily_delay_check()
     st.session_state["_delay_check_done_for"] = _today_str
 
-st.sidebar.markdown("### 🔐 관리자 로그인")
-pw_input = st.sidebar.text_input("관리자 비밀번호", type="password")
-is_admin = pw_input == ADMIN_PASSWORD
-if pw_input:
-    if is_admin:
-        st.sidebar.success("관리자 모드 ✅")
-    else:
-        st.sidebar.error("비밀번호 틀림")
+is_admin = st.session_state.get("is_admin", False)
 
 tab_receivable, tab_progress, tab_calendar, tab_risk, tab_contract, tab_admin = st.tabs([
     "📋 현장별 미수현황", "📊 기성청구현황", "📅 입금 캘린더", "🚨 리스크 현장", "📈 계약현황", "🔐 관리자"
@@ -1215,8 +1213,20 @@ with tab_contract:
 with tab_admin:
     st.subheader("관리자")
     if not is_admin:
-        st.warning("🔒 관리자 전용 메뉴입니다. 왼쪽 사이드바에서 비밀번호를 입력하세요.")
+        st.markdown("### 🔒 관리자 로그인")
+        with st.form("admin_login_form"):
+            pw_input = st.text_input("관리자 비밀번호", type="password")
+            submitted = st.form_submit_button("로그인")
+        if submitted:
+            if pw_input == ADMIN_PASSWORD:
+                st.session_state["is_admin"] = True
+                st.rerun()
+            else:
+                st.error("비밀번호가 틀렸습니다.")
     else:
+        if st.button("🔓 로그아웃"):
+            st.session_state["is_admin"] = False
+            st.rerun()
         st.markdown("업로드하면 **해당 데이터 전체가 지금 올리는 파일 내용으로 갈음**됩니다 (기존 것 삭제 후 새로 채움).")
 
         # ---------------- 일일수금관리 업로드 ----------------
