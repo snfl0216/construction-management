@@ -461,7 +461,7 @@ if "current_page" not in st.session_state:
     st.session_state.current_page = PAGES[0]
 
 with st.sidebar:
-    st.markdown("<div style='height:96px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:120px;'></div>", unsafe_allow_html=True)
     for p in PAGES:
         is_current = st.session_state.current_page == p
         if st.button(f"{PAGE_ICONS[p]}  {p}", use_container_width=True,
