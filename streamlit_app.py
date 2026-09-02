@@ -602,7 +602,8 @@ with tab_progress:
                 ref_date = today
             delay_days = calc_delay_days(c["original_due_date"], ref_date) if c["status"] != "확인필요" else 0
             claim_rows.append({
-                "id": cid, "현장명": c["site_name"], "담당자": c["manager"], "채권종류": c["claim_type"],
+                "id": cid, "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
+                "담당자": c["manager"], "채권종류": c["claim_type"],
                 "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
                 "청구금액": c["claim_amount"], "입금액": paid, "미수잔액": unpaid,
                 "지연횟수": delay_count, "총지연일수": delay_days,
@@ -613,16 +614,19 @@ with tab_progress:
 
         if view_mode == "현장별":
             disp = claim_df_all[claim_df_all["미수잔액"] > 0].copy()
-            f1, f2, f3 = st.columns(3)
+            f1, f2, f3, f4 = st.columns(4)
             site_filter = f1.selectbox("현장 필터", ["전체"] + sorted(disp["현장명"].unique().tolist()))
             type_filter = f2.selectbox("채권종류 필터", ["전체"] + CLAIM_TYPES)
             manager_filter = f3.selectbox("담당자 필터", ["전체"] + sorted(disp["담당자"].dropna().unique().tolist()))
+            company_filter = f4.selectbox("업체명 필터", ["전체"] + sorted(disp["업체명"].dropna().unique().tolist()))
             if site_filter != "전체":
                 disp = disp[disp["현장명"] == site_filter]
             if type_filter != "전체":
                 disp = disp[disp["채권종류"] == type_filter]
             if manager_filter != "전체":
                 disp = disp[disp["담당자"] == manager_filter]
+            if company_filter != "전체":
+                disp = disp[disp["업체명"] == company_filter]
 
             disp = disp.assign(_sort=pd.to_datetime(disp["최초예정일"], errors="coerce")).sort_values("_sort", na_position="last")
 
@@ -633,7 +637,7 @@ with tab_progress:
                     return f"<span style='color:#b7950b;font-weight:600;'>{s}</span>"
                 return s
 
-            cols_bysite = ["현장명", "담당자", "채권종류", "최초예정일", "입금예정일", "청구금액", "입금액", "미수잔액", "지연횟수", "총지연일수", "상태"]
+            cols_bysite = ["현장명", "업체명", "담당자", "채권종류", "최초예정일", "입금예정일", "청구금액", "입금액", "미수잔액", "지연횟수", "총지연일수", "상태"]
             show = disp[cols_bysite]
 
             total_row = {c: "" for c in cols_bysite}
