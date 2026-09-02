@@ -17,26 +17,30 @@ CLAIM_TYPES = ["선급금", "기성금", "중도금", "잔금", "추가금", "�
 _db_status = None
 _db_error = None
 try:
-    _turso_url = st.secrets["TURSO_DATABASE_URL"].replace("libsql://", "")
-    _turso_token = st.secrets["TURSO_AUTH_TOKEN"]
-    engine = create_engine(f"sqlite+libsql://{_turso_url}?authToken={_turso_token}&secure=true")
+    _pg_url = st.secrets["SUPABASE_DB_URL"]
+    if _pg_url.startswith("postgresql://"):
+        _pg_url = _pg_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    engine = create_engine(_pg_url)
     with engine.connect() as _test_conn:
         _test_conn.execute(text("SELECT 1"))
-    _db_status = "turso"
+    _db_status = "supabase"
 except Exception as e:
-    # Turso 접속 실패하면(설정 안 됐거나 오류) 로컬 파일 DB로 대체 — 단, 화면에 표시해서 숨기지 않는다
+    # Supabase 접속 실패하면(설정 안 됐거나 오류) 로컬 파일 DB로 대체 — 단, 화면에 표시해서 숨기지 않는다
     engine = create_engine("sqlite:///construction_v6.db")
     _db_status = "local"
     _db_error = str(e)
+
+# id 자동증가 문법이 SQLite(AUTOINCREMENT)와 PostgreSQL(SERIAL)이 서로 달라서, 지금 연결된 DB에 맞춰 고른다
+PK = "SERIAL PRIMARY KEY" if _db_status == "supabase" else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
 # --------------------------------------------------------------------------
 # DB 초기화 — 두 데이터 파이프라인 완전히 분리
 # --------------------------------------------------------------------------
 with engine.connect() as conn:
     # ===== 일일수금관리(이력) 기준 : 기성청구현황 / 캘린더 / 리스크현장 =====
-    conn.execute(text("""
+    conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claims (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {PK},
             site_name TEXT,
             company_name TEXT,
             manager TEXT,
@@ -50,17 +54,17 @@ with engine.connect() as conn:
             last_remark TEXT
         );
     """))
-    conn.execute(text("""
+    conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {PK},
             claim_id INTEGER,
             payment_date TEXT,
             payment_amount INTEGER DEFAULT 0
         );
     """))
-    conn.execute(text("""
+    conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claim_delay_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {PK},
             claim_id INTEGER,
             event_type TEXT,
             changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -71,9 +75,9 @@ with engine.connect() as conn:
             reason TEXT
         );
     """))
-    conn.execute(text("""
+    conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claim_checkpoints (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {PK},
             claim_id INTEGER,
             checkpoint_date TEXT,
             remark TEXT,
@@ -81,9 +85,9 @@ with engine.connect() as conn:
         );
     """))
     # ===== 현장별 미수관리(미수내역) 기준 : 현장별 미수현황 / 완불현장 / 계약현황 =====
-    conn.execute(text("""
+    conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS site_receivables (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {PK},
             no_number INTEGER,
             division TEXT,
             site_name TEXT,
@@ -122,9 +126,9 @@ with engine.connect() as conn:
         conn.commit()
     except Exception:
         pass
-    conn.execute(text("""
+    conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS site_receivable_details (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {PK},
             site_receivable_id INTEGER,
             detail_type TEXT,
             detail_date TEXT,
@@ -132,9 +136,9 @@ with engine.connect() as conn:
             note TEXT
         );
     """))
-    conn.execute(text("""
+    conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS contract_status_raw (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {PK},
             year INTEGER,
             label TEXT,
             m1 REAL, m2 REAL, m3 REAL, m4 REAL, m5 REAL, m6 REAL,
@@ -359,10 +363,10 @@ def run_daily_delay_check():
 
 run_daily_delay_check()
 
-if _db_status == "turso":
-    st.sidebar.success("🟢 DB: Turso(클라우드) 연결됨")
+if _db_status == "supabase":
+    st.sidebar.success("🟢 DB: Supabase(클라우드) 연결됨")
 else:
-    st.sidebar.error(f"🔴 DB: 로컬(임시) — Turso 연결 실패\n\n{_db_error}")
+    st.sidebar.error(f"🔴 DB: 로컬(임시) — Supabase 연결 실패\n\n{_db_error}")
 
 st.sidebar.markdown("### 🔐 관리자 로그인")
 pw_input = st.sidebar.text_input("관리자 비밀번호", type="password")
@@ -1217,10 +1221,11 @@ with tab_admin:
                             res = conn.execute(text("""
                                 INSERT INTO claims (site_name, company_name, manager, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status, last_remark)
                                 VALUES (:sn, :cn, :mg, :ctype, :cdate, :odue, :cdue, :amt, :status, :remark)
+                                RETURNING id
                             """), {"sn": site_name, "cn": company_name_v, "mg": manager, "ctype": claim_type_v, "cdate": orig_due_str,
                                    "odue": orig_due_str, "cdue": cur_due_str, "amt": claim_amount, "status": status,
                                    "remark": remark_v})
-                            claim_id = res.lastrowid
+                            claim_id = res.scalar()
                             n_claims += 1
 
                             prev_due = orig_due
@@ -1370,6 +1375,7 @@ with tab_admin:
                                  completion_date, contract_yearmonth, contract_amount, change_amount, total_paid,
                                  unpaid_balance, progress_rate, invoice_progress_rate, invoice_issue_rate, is_active, status_label)
                                 VALUES (:no,:div,:sn,:cn,:mg,:br,:cc,:cd,:sd,:ed,:ym,:ca,:cha,:tp,:ub,:pr,:ipr,:iir,:ia,:sl)
+                                RETURNING id
                             """), {
                                 "no": int(r[6]) if isinstance(r[6], (int, float)) else None,
                                 "div": division_v,
@@ -1383,7 +1389,7 @@ with tab_admin:
                                 "iir": float(r[21]) if isinstance(r[21], (int, float)) else 0,
                                 "ia": is_active, "sl": status_label,
                             })
-                            site_id = res.lastrowid
+                            site_id = res.scalar()
 
                             j = i + 1
                             while j < len(rows) and not is_blank(rows[j]) and rows[j][7] is None:
