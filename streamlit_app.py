@@ -14,33 +14,39 @@ ADMIN_PASSWORD = "chdan1576**"
 
 CLAIM_TYPES = ["선급금", "기성금", "중도금", "잔금", "추가금", "정산금", "AS", "시공부자재"]
 
-_db_status = None
-_db_error = None
-try:
-    _pg_url = st.secrets["SUPABASE_DB_URL"]
-    if _pg_url.startswith("postgresql://"):
-        _pg_url = _pg_url.replace("postgresql://", "postgresql+psycopg2://", 1)
-    engine = create_engine(_pg_url)
-    with engine.connect() as _test_conn:
-        _test_conn.execute(text("SELECT 1"))
-    _db_status = "supabase"
-except Exception as e:
-    # Supabase 접속 실패하면(설정 안 됐거나 오류) 로컬 파일 DB로 대체 — 단, 화면에 표시해서 숨기지 않는다
-    engine = create_engine("sqlite:///construction_v6.db")
-    _db_status = "local"
-    _db_error = str(e)
+@st.cache_resource
+def get_engine_and_status():
+    """DB 연결은 앱이 켜져있는 동안 딱 한 번만 만든다.
+    (버튼 클릭마다 스트림릿이 코드를 처음부터 다시 돌리는데, 매번 새로 연결하면 그 왕복시간이 계속 쌓인다)"""
+    try:
+        pg_url = st.secrets["SUPABASE_DB_URL"]
+        if pg_url.startswith("postgresql://"):
+            pg_url = pg_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+        eng = create_engine(pg_url, connect_args={"options": "-c statement_timeout=60000"})
+        with eng.connect() as _test_conn:
+            _test_conn.execute(text("SELECT 1"))
+        return eng, "supabase", None
+    except Exception as e:
+        # Supabase 접속 실패하면(설정 안 됐거나 오류) 로컬 파일 DB로 대체 — 단, 화면에 표시해서 숨기지 않는다
+        eng = create_engine("sqlite:///construction_v6.db")
+        return eng, "local", str(e)
+
+
+engine, _db_status, _db_error = get_engine_and_status()
 
 # id 자동증가 문법이 SQLite(AUTOINCREMENT)와 PostgreSQL(SERIAL)이 서로 달라서, 지금 연결된 DB에 맞춰 고른다
 PK = "SERIAL PRIMARY KEY" if _db_status == "supabase" else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
 # --------------------------------------------------------------------------
-# DB 초기화 — 두 데이터 파이프라인 완전히 분리
+# DB 초기화 — 두 데이터 파이프라인 완전히 분리 (이것도 앱 켜져있는 동안 딱 한 번만 실행)
 # --------------------------------------------------------------------------
-with engine.connect() as conn:
+@st.cache_resource
+def init_schema(_engine, db_status, pk):
+  with _engine.connect() as conn:
     # ===== 일일수금관리(이력) 기준 : 기성청구현황 / 캘린더 / 리스크현장 =====
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claims (
-            id {PK},
+            id {pk},
             site_name TEXT,
             company_name TEXT,
             manager TEXT,
@@ -57,7 +63,7 @@ with engine.connect() as conn:
     conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS payments (
-            id {PK},
+            id {pk},
             claim_id INTEGER,
             payment_date TEXT,
             payment_amount BIGINT DEFAULT 0
@@ -66,7 +72,7 @@ with engine.connect() as conn:
     conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claim_delay_history (
-            id {PK},
+            id {pk},
             claim_id INTEGER,
             event_type TEXT,
             changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -80,7 +86,7 @@ with engine.connect() as conn:
     conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claim_checkpoints (
-            id {PK},
+            id {pk},
             claim_id INTEGER,
             checkpoint_date TEXT,
             remark TEXT,
@@ -91,7 +97,7 @@ with engine.connect() as conn:
     # ===== 현장별 미수관리(미수내역) 기준 : 현장별 미수현황 / 완불현장 / 계약현황 =====
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS site_receivables (
-            id {PK},
+            id {pk},
             no_number INTEGER,
             division TEXT,
             site_name TEXT,
@@ -132,8 +138,10 @@ with engine.connect() as conn:
     except Exception:
         conn.rollback()
     # 예전에 이미 만들어진 테이블(특히 Supabase/Postgres)의 금액 컬럼이 INTEGER(최대 21억)로 남아있으면
-    # 21억 넘는 계약금액에서 넘침 오류가 나므로, BIGINT로 강제 승격한다 (SQLite에서는 원래 있으나 마나라 실패해도 무해)
-    if _db_status == "supabase":
+    # 21억 넘는 계약금액에서 넘침 오류가 나므로, BIGINT로 강제 승격한다 (SQLite에서는 원래 있으나 마나라 실패해도 무해).
+    # 매번 페이지 열 때마다 다시 시도하면 락 경합으로 앱 전체가 멈출 수 있어서,
+    # 1) 이미 BIGINT면 건너뛰고 2) 락을 오래 못 잡으면 무한정 기다리지 않고 빨리 포기한다.
+    if db_status == "supabase":
         for tbl, col in [
             ("claims", "claim_amount"), ("payments", "payment_amount"),
             ("site_receivables", "contract_amount"), ("site_receivables", "change_amount"),
@@ -141,13 +149,20 @@ with engine.connect() as conn:
             ("site_receivable_details", "amount"), ("claim_checkpoints", "unpaid_balance"),
         ]:
             try:
+                already_bigint = conn.execute(text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_name=:t AND column_name=:c"
+                ), {"t": tbl, "c": col}).scalar()
+                if already_bigint == "bigint":
+                    continue
+                conn.execute(text("SET LOCAL lock_timeout = '3s';"))
                 conn.execute(text(f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT;"))
                 conn.commit()
             except Exception:
                 conn.rollback()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS site_receivable_details (
-            id {PK},
+            id {pk},
             site_receivable_id INTEGER,
             detail_type TEXT,
             detail_date TEXT,
@@ -158,7 +173,7 @@ with engine.connect() as conn:
     conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS contract_status_raw (
-            id {PK},
+            id {pk},
             year INTEGER,
             label TEXT,
             m1 REAL, m2 REAL, m3 REAL, m4 REAL, m5 REAL, m6 REAL,
@@ -168,6 +183,8 @@ with engine.connect() as conn:
     """))
     conn.commit()
 
+
+init_schema(engine, _db_status, PK)
 
 # --------------------------------------------------------------------------
 # 공용 함수
@@ -381,7 +398,10 @@ def run_daily_delay_check():
         conn.commit()
 
 
-run_daily_delay_check()
+_today_str = date.today().isoformat()
+if st.session_state.get("_delay_check_done_for") != _today_str:
+    run_daily_delay_check()
+    st.session_state["_delay_check_done_for"] = _today_str
 
 if _db_status == "supabase":
     st.sidebar.success("🟢 DB: Supabase(클라우드) 연결됨")
@@ -548,8 +568,8 @@ with tab_receivable:
 
             with engine.connect() as conn:
                 detail_df = pd.read_sql(
-                    "SELECT detail_type as 구분, detail_date as 일자, amount as 금액, note as 비고 "
-                    "FROM site_receivable_details WHERE site_receivable_id=:sid ORDER BY detail_date;",
+                    text("SELECT detail_type as 구분, detail_date as 일자, amount as 금액, note as 비고 "
+                         "FROM site_receivable_details WHERE site_receivable_id=:sid ORDER BY detail_date;"),
                     conn, params={"sid": int(row["id"])}
                 )
             if detail_df.empty:
