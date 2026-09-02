@@ -460,12 +460,11 @@ if "current_page" not in st.session_state:
     st.session_state.current_page = PAGES[0]
 
 with st.sidebar:
-    st.markdown("<div style='height:120px;'></div>", unsafe_allow_html=True)
     st.markdown(
-        "<div style='color:#000;font-size:24px;font-weight:700;"
-        "margin-bottom:28px;'>현장 미수관리 시스템</div>",
+        "<div style='color:#5F5E5A;font-size:24px;font-weight:700;'>현장 미수관리 시스템</div>",
         unsafe_allow_html=True
     )
+    st.markdown("<div style='height:88px;'></div>", unsafe_allow_html=True)
     for p in PAGES:
         is_current = st.session_state.current_page == p
         if st.button(f"{PAGE_ICONS[p]}  {p}", use_container_width=True,
