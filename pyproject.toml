@@ -12,6 +12,7 @@ dependencies = [
     "streamlit>=1.60.0",
     "streamlit-calendar>=1.4.0",
     "supabase>=2.31.0",
+    "sqlalchemy-libsql",
 ]
 
 [tool.uv]
