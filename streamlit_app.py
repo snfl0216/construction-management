@@ -1153,6 +1153,11 @@ with tab_admin:
                     has_bond = "bond_name" in raw_df.columns
                     groups = raw_df.groupby("bond_name") if has_bond else [(i, raw_df.loc[[i]]) for i in raw_df.index]
                     n_claims = 0
+                    claims_batch = []
+                    history_batch = []
+                    checkpoint_batch = []
+                    payment_batch = []
+
                     for _, grp_raw in groups:
                         # 채권명이 같아도(현장+업체+구분+금액 우연히 동일), 중간에 미수잔액이 0으로
                         # 완전히 끝났다가 이후에 다시 미수금이 생기면 별개의 새 채권으로 취급해서 쪼갠다.
@@ -1224,24 +1229,22 @@ with tab_admin:
                             if remark_v.lower() in ("none", "nan"):
                                 remark_v = ""
 
-                            res = conn.execute(text("""
-                                INSERT INTO claims (site_name, company_name, manager, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status, last_remark)
-                                VALUES (:sn, :cn, :mg, :ctype, :cdate, :odue, :cdue, :amt, :status, :remark)
-                                RETURNING id
-                            """), {"sn": site_name, "cn": company_name_v, "mg": manager, "ctype": claim_type_v, "cdate": orig_due_str,
-                                   "odue": orig_due_str, "cdue": cur_due_str, "amt": claim_amount, "status": status,
-                                   "remark": remark_v})
-                            claim_id = res.scalar()
+                            claims_batch.append({
+                                "sn": site_name, "cn": company_name_v, "mg": manager, "ctype": claim_type_v,
+                                "cdate": orig_due_str, "odue": orig_due_str, "cdue": cur_due_str,
+                                "amt": claim_amount, "status": status, "remark": remark_v,
+                            })
+                            claim_idx = len(claims_batch) - 1  # 이 배치 안에서의 임시 순번 (나중에 실제 id로 치환)
                             n_claims += 1
 
                             prev_due = orig_due
                             for _, r in grp.iterrows():
                                 this_due = safe_date(r.get("current_due_date"))
                                 if this_due and prev_due and this_due != prev_due:
-                                    conn.execute(text("""
-                                        INSERT INTO claim_delay_history (claim_id, event_type, old_due_date, new_due_date, delay_days, reason)
-                                        VALUES (:cid, '자동지연', :old, :new, :ddays, '엑셀 이력 가져오기')
-                                    """), {"cid": claim_id, "old": prev_due.isoformat(), "new": this_due.isoformat(), "ddays": (this_due - prev_due).days})
+                                    history_batch.append({
+                                        "claim_idx": claim_idx, "old": prev_due.isoformat(), "new": this_due.isoformat(),
+                                        "ddays": (this_due - prev_due).days,
+                                    })
                                 if this_due:
                                     prev_due = this_due
 
@@ -1254,27 +1257,74 @@ with tab_admin:
                                         row_remark = ""
                                     row_unpaid_raw = r.get("sheet_unpaid_balance", None)
                                     row_unpaid = parse_amount(row_unpaid_raw) if pd.notna(row_unpaid_raw) else None
-                                    conn.execute(text("""
-                                        INSERT INTO claim_checkpoints (claim_id, checkpoint_date, remark, unpaid_balance)
-                                        VALUES (:cid, :cdate, :remark, :unpaid)
-                                    """), {"cid": claim_id, "cdate": this_due.isoformat(), "remark": row_remark, "unpaid": row_unpaid})
+                                    checkpoint_batch.append({
+                                        "claim_idx": claim_idx, "cdate": this_due.isoformat(),
+                                        "remark": row_remark, "unpaid": row_unpaid,
+                                    })
 
                             # 실제 들어온 금액(total_paid)만큼 딱 하나의 입금 기록으로 남긴다 (개별 로그 다 넣으면 취소분까지 같이 잡힘)
                             if total_paid > 0:
                                 valid_pay_dates = [pd for pd, _ in payment_events if pd]
                                 pdate_final = max(valid_pay_dates) if valid_pay_dates else (cur_due or date.today())
-                                conn.execute(text("INSERT INTO payments (claim_id, payment_date, payment_amount) VALUES (:cid,:pd,:pa)"),
-                                             {"cid": claim_id, "pd": pdate_final.isoformat(), "pa": total_paid})
+                                payment_batch.append({"claim_idx": claim_idx, "pd": pdate_final.isoformat(), "pa": total_paid})
                                 if status == "완납":
                                     delay_days = 0
                                     event_type = "입금완료(정상)"
                                     if orig_due and pdate_final > orig_due:
                                         delay_days = (pdate_final - orig_due).days
                                         event_type = "입금완료(지연)"
-                                    conn.execute(text("""
-                                        INSERT INTO claim_delay_history (claim_id, event_type, payment_date, delay_days, reason)
-                                        VALUES (:cid, :etype, :pd, :dd, '엑셀 이력 가져오기')
-                                    """), {"cid": claim_id, "etype": event_type, "pd": pdate_final.isoformat(), "dd": delay_days})
+                                    history_batch.append({
+                                        "claim_idx": claim_idx, "event_pay": True, "etype": event_type,
+                                        "pd": pdate_final.isoformat(), "dd": delay_days,
+                                    })
+
+                    # ---- 여기서부터 실제 DB 왕복: claims는 한 번에 다 넣고 id를 순서대로 받아온다 ----
+                    claim_ids = []
+                    if claims_batch:
+                        for cb in claims_batch:
+                            res = conn.execute(text("""
+                                INSERT INTO claims (site_name, company_name, manager, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status, last_remark)
+                                VALUES (:sn, :cn, :mg, :ctype, :cdate, :odue, :cdue, :amt, :status, :remark)
+                                RETURNING id
+                            """), cb)
+                            claim_ids.append(res.scalar())
+
+                    # 자식 테이블들은 claim_idx를 실제 claim_id로 치환한 다음, 테이블당 딱 한 번씩만 왕복해서 넣는다
+                    history_rows = []
+                    for h in history_batch:
+                        cid = claim_ids[h["claim_idx"]]
+                        if h.get("event_pay"):
+                            history_rows.append({
+                                "cid": cid, "etype": h["etype"], "pd": h["pd"], "dd": h["dd"],
+                            })
+                        else:
+                            history_rows.append({
+                                "cid": cid, "old": h["old"], "new": h["new"], "ddays": h["ddays"],
+                            })
+                    if history_rows:
+                        auto_rows = [h for h in history_batch if not h.get("event_pay")]
+                        pay_rows = [h for h in history_batch if h.get("event_pay")]
+                        if auto_rows:
+                            conn.execute(text("""
+                                INSERT INTO claim_delay_history (claim_id, event_type, old_due_date, new_due_date, delay_days, reason)
+                                VALUES (:cid, '자동지연', :old, :new, :ddays, '엑셀 이력 가져오기')
+                            """), [{"cid": claim_ids[h["claim_idx"]], "old": h["old"], "new": h["new"], "ddays": h["ddays"]} for h in auto_rows])
+                        if pay_rows:
+                            conn.execute(text("""
+                                INSERT INTO claim_delay_history (claim_id, event_type, payment_date, delay_days, reason)
+                                VALUES (:cid, :etype, :pd, :dd, '엑셀 이력 가져오기')
+                            """), [{"cid": claim_ids[h["claim_idx"]], "etype": h["etype"], "pd": h["pd"], "dd": h["dd"]} for h in pay_rows])
+
+                    if checkpoint_batch:
+                        conn.execute(text("""
+                            INSERT INTO claim_checkpoints (claim_id, checkpoint_date, remark, unpaid_balance)
+                            VALUES (:cid, :cdate, :remark, :unpaid)
+                        """), [{"cid": claim_ids[c["claim_idx"]], "cdate": c["cdate"], "remark": c["remark"], "unpaid": c["unpaid"]} for c in checkpoint_batch])
+
+                    if payment_batch:
+                        conn.execute(text("INSERT INTO payments (claim_id, payment_date, payment_amount) VALUES (:cid,:pd,:pa)"),
+                                     [{"cid": claim_ids[p["claim_idx"]], "pd": p["pd"], "pa": p["pa"]} for p in payment_batch])
+
                     conn.commit()
                 st.success(f"✅ 완료! 청구 {n_claims}건 반영 (기존 데이터는 전부 새 데이터로 갈음됨)")
                 st.rerun()
@@ -1322,6 +1372,11 @@ with tab_admin:
                         ws_cs = wb["계약현황"]
                         KEEP_LABELS = ("총 계약금", "서울", "대구", "대리점", "해외",
                                        "총 현장수", "서울현장수", "대구현장수", "대리점현장수", "해외현장수")
+
+                        def to_f(v):
+                            return float(v) if isinstance(v, (int, float)) else None
+
+                        status_batch = []
                         for row in ws_cs.iter_rows(min_row=1, values_only=True):
                             if len(row) < 16:
                                 continue
@@ -1330,24 +1385,23 @@ with tab_admin:
                                 continue
                             months = row[3:15]
                             total_v = row[15]
-
-                            def to_f(v):
-                                return float(v) if isinstance(v, (int, float)) else None
-
-                            conn.execute(text("""
-                                INSERT INTO contract_status_raw
-                                (year, label, m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,m12, total)
-                                VALUES (:yr,:lb,:m1,:m2,:m3,:m4,:m5,:m6,:m7,:m8,:m9,:m10,:m11,:m12,:tot)
-                            """), {
+                            status_batch.append({
                                 "yr": int(year_v), "lb": label_v,
                                 **{f"m{k+1}": to_f(months[k]) for k in range(12)},
                                 "tot": to_f(total_v),
                             })
-                            n_status_rows += 1
+                        if status_batch:
+                            conn.execute(text("""
+                                INSERT INTO contract_status_raw
+                                (year, label, m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,m12, total)
+                                VALUES (:yr,:lb,:m1,:m2,:m3,:m4,:m5,:m6,:m7,:m8,:m9,:m10,:m11,:m12,:tot)
+                            """), status_batch)
+                        n_status_rows = len(status_batch)
                         conn.commit()
 
                     n_sites = 0
                     i = 0
+                    details_batch = []
                     while i < len(rows):
                         r = rows[i]
                         if r[7]:  # 공사명
@@ -1402,26 +1456,27 @@ with tab_admin:
                                 d = rows[j]
                                 # 변경계약: col11=날짜, col12=문서종류, col15=금액
                                 if isinstance(d[11], datetime) and isinstance(d[15], (int, float)) and d[15]:
-                                    conn.execute(text("""
-                                        INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
-                                        VALUES (:sid,'변경계약',:dt,:amt,:note)
-                                    """), {"sid": site_id, "dt": to_date_s(d[11]), "amt": to_won_from_thousands(d[15]), "note": d[12] or ""})
+                                    details_batch.append({"sid": site_id, "dtype": "변경계약", "dt": to_date_s(d[11]),
+                                                           "amt": to_won_from_thousands(d[15]), "note": d[12] or ""})
                                 # 계산서: col28=발행일, col29=발행액
                                 if isinstance(d[28], datetime) and isinstance(d[29], (int, float)) and d[29]:
-                                    conn.execute(text("""
-                                        INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
-                                        VALUES (:sid,'계산서',:dt,:amt,'')
-                                    """), {"sid": site_id, "dt": to_date_s(d[28]), "amt": to_won_from_thousands(d[29])})
+                                    details_batch.append({"sid": site_id, "dtype": "계산서", "dt": to_date_s(d[28]),
+                                                           "amt": to_won_from_thousands(d[29]), "note": ""})
                                 # 입금: col31=입금일, col32=입금액
                                 if isinstance(d[31], datetime) and isinstance(d[32], (int, float)) and d[32]:
-                                    conn.execute(text("""
-                                        INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
-                                        VALUES (:sid,'입금',:dt,:amt,'')
-                                    """), {"sid": site_id, "dt": to_date_s(d[31]), "amt": to_won_from_thousands(d[32])})
+                                    details_batch.append({"sid": site_id, "dtype": "입금", "dt": to_date_s(d[31]),
+                                                           "amt": to_won_from_thousands(d[32]), "note": ""})
                                 j += 1
                             i = j
                         else:
                             i += 1
+
+                    if details_batch:
+                        conn.execute(text("""
+                            INSERT INTO site_receivable_details (site_receivable_id, detail_type, detail_date, amount, note)
+                            VALUES (:sid, :dtype, :dt, :amt, :note)
+                        """), details_batch)
+
                     conn.commit()
                 st.success(f"✅ 완료! 현장 {n_sites}개, 계약현황 {n_status_rows}행 반영 (기존 데이터는 전부 새 데이터로 갈음됨)")
                 st.rerun()
