@@ -17,7 +17,7 @@ CLAIM_TYPES = ["선급금", "기성금", "중도금", "잔금", "추가금", "�
 @st.cache_resource
 def get_engine():
     """DB 연결은 앱이 켜져있는 동안 딱 한 번만 만든다."""
-    return create_engine("sqlite:///construction_v6.db")
+    return create_engine("sqlite:////tmp/construction_v6.db")
 
 
 engine = get_engine()
