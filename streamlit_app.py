@@ -48,7 +48,7 @@ with engine.connect() as conn:
             claim_date TEXT,
             original_due_date TEXT,
             current_due_date TEXT,
-            claim_amount INTEGER DEFAULT 0,
+            claim_amount BIGINT DEFAULT 0,
             status TEXT DEFAULT '입금대기',
             last_flagged_due_date TEXT,
             last_remark TEXT
@@ -60,7 +60,7 @@ with engine.connect() as conn:
             id {PK},
             claim_id INTEGER,
             payment_date TEXT,
-            payment_amount INTEGER DEFAULT 0
+            payment_amount BIGINT DEFAULT 0
         );
     """))
     conn.commit()
@@ -84,7 +84,7 @@ with engine.connect() as conn:
             claim_id INTEGER,
             checkpoint_date TEXT,
             remark TEXT,
-            unpaid_balance INTEGER
+            unpaid_balance BIGINT
         );
     """))
     conn.commit()
@@ -103,10 +103,10 @@ with engine.connect() as conn:
             start_date TEXT,
             completion_date TEXT,
             contract_yearmonth TEXT,
-            contract_amount INTEGER DEFAULT 0,
-            change_amount INTEGER DEFAULT 0,
-            total_paid INTEGER DEFAULT 0,
-            unpaid_balance INTEGER DEFAULT 0,
+            contract_amount BIGINT DEFAULT 0,
+            change_amount BIGINT DEFAULT 0,
+            total_paid BIGINT DEFAULT 0,
+            unpaid_balance BIGINT DEFAULT 0,
             progress_rate REAL DEFAULT 0,
             invoice_progress_rate REAL DEFAULT 0,
             invoice_issue_rate REAL DEFAULT 0,
@@ -131,13 +131,27 @@ with engine.connect() as conn:
         conn.commit()
     except Exception:
         conn.rollback()
+    # 예전에 이미 만들어진 테이블(특히 Supabase/Postgres)의 금액 컬럼이 INTEGER(최대 21억)로 남아있으면
+    # 21억 넘는 계약금액에서 넘침 오류가 나므로, BIGINT로 강제 승격한다 (SQLite에서는 원래 있으나 마나라 실패해도 무해)
+    if _db_status == "supabase":
+        for tbl, col in [
+            ("claims", "claim_amount"), ("payments", "payment_amount"),
+            ("site_receivables", "contract_amount"), ("site_receivables", "change_amount"),
+            ("site_receivables", "total_paid"), ("site_receivables", "unpaid_balance"),
+            ("site_receivable_details", "amount"), ("claim_checkpoints", "unpaid_balance"),
+        ]:
+            try:
+                conn.execute(text(f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE BIGINT;"))
+                conn.commit()
+            except Exception:
+                conn.rollback()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS site_receivable_details (
             id {PK},
             site_receivable_id INTEGER,
             detail_type TEXT,
             detail_date TEXT,
-            amount INTEGER DEFAULT 0,
+            amount BIGINT DEFAULT 0,
             note TEXT
         );
     """))
@@ -586,15 +600,20 @@ with tab_progress:
         st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '일일수금관리' 엑셀을 업로드해주세요.")
     else:
         today = date.today()
+        empty_df = pd.DataFrame()
+        payments_by_claim = {cid: g for cid, g in payments_df.groupby("claim_id")} if not payments_df.empty else {}
+        history_by_claim = {cid: g for cid, g in history_df.groupby("claim_id")} if not history_df.empty else {}
+
         claim_rows = []
         for _, c in claims_df.iterrows():
             cid = c["id"]
-            paid = payments_df[payments_df["claim_id"] == cid]["payment_amount"].sum() if not payments_df.empty else 0
+            pay_rows = payments_by_claim.get(cid, empty_df)
+            paid = pay_rows["payment_amount"].sum() if not pay_rows.empty else 0
             unpaid = (c["claim_amount"] or 0) - paid
-            hist = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
+            hist_g = history_by_claim.get(cid, empty_df)
+            hist = hist_g[hist_g["event_type"] == "자동지연"] if not hist_g.empty else empty_df
             delay_count = len(hist)
             if c["status"] == "완납":
-                pay_rows = payments_df[payments_df["claim_id"] == cid] if not payments_df.empty else pd.DataFrame()
                 ref_date = (safe_date(pay_rows.iloc[-1]["payment_date"]) if not pay_rows.empty else today) or today
             else:
                 ref_date = today
@@ -740,6 +759,13 @@ with tab_calendar:
         st.caption("🔴 지연　🟢 입금완료　⚪ 입금대기")
         yr, mo = st.session_state.cal_year, st.session_state.cal_month
 
+        # 청구건마다 매번 전체 표를 다시 훑으면(예: checkpoints_df[checkpoints_df["claim_id"]==cid]) 느려지므로,
+        # claim_id 기준으로 미리 한 번만 묶어두고 그 후엔 딕셔너리로 바로 찾아 쓴다
+        checkpoints_by_claim = {cid: g for cid, g in checkpoints_df.groupby("claim_id")} if not checkpoints_df.empty else {}
+        history_by_claim = {cid: g for cid, g in history_df.groupby("claim_id")} if not history_df.empty else {}
+        payments_by_claim = {cid: g for cid, g in payments_df.groupby("claim_id")} if not payments_df.empty else {}
+        empty_df = pd.DataFrame()
+
         day_entries = {}
         for _, c in claims_df.iterrows():
             cid = c["id"]
@@ -763,7 +789,7 @@ with tab_calendar:
 
             # 2) 과거에 밀렸던 예정일들 전부 — 그 시점(체크포인트)에 실제로 미수였던 날짜는
             #    지금 완납됐어도 그날짜엔 그대로 남긴다 (그 순간엔 진짜 미수였으니까)
-            cp_rows = checkpoints_df[checkpoints_df["claim_id"] == cid] if not checkpoints_df.empty else pd.DataFrame()
+            cp_rows = checkpoints_by_claim.get(cid, empty_df)
             for _, cp in cp_rows.iterrows():
                 cp_d = safe_date(cp["checkpoint_date"])
                 if not cp_d or cp_d.year != yr or cp_d.month != mo or cp_d >= today or cp_d == cur_d:
@@ -851,16 +877,18 @@ with tab_calendar:
             for _, c in claims_df.iterrows():
                 cid = c["id"]
                 cur_d = safe_date(c["current_due_date"])
-                hist_all = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
+                hist_g = history_by_claim.get(cid, empty_df)
+                hist_all = hist_g[hist_g["event_type"] == "자동지연"] if not hist_g.empty else empty_df
+
+                cp_g = checkpoints_by_claim.get(cid, empty_df)
+                cp_today = cp_g[cp_g["checkpoint_date"] == sel_date] if not cp_g.empty else empty_df
 
                 is_current_match = (cur_d == sel_d)
                 is_checkpoint_match = False
-                if not is_current_match and not checkpoints_df.empty:
-                    cp_hit = checkpoints_df[(checkpoints_df["claim_id"] == cid) & (checkpoints_df["checkpoint_date"] == sel_date)]
-                    if not cp_hit.empty and sel_d < today:
-                        cp_unpaid = cp_hit.iloc[-1]["unpaid_balance"]
-                        if cp_unpaid is not None and cp_unpaid > 0:
-                            is_checkpoint_match = True
+                if not is_current_match and not cp_today.empty and sel_d < today:
+                    cp_unpaid = cp_today.iloc[-1]["unpaid_balance"]
+                    if cp_unpaid is not None and cp_unpaid > 0:
+                        is_checkpoint_match = True
 
                 if not (is_current_match or is_checkpoint_match):
                     continue
@@ -888,16 +916,14 @@ with tab_calendar:
 
                 # 그 날짜(sel_d)에 실제로 적혀있던 비고를 그대로 찾아서 붙인다 (최신 비고로 통일하지 않음)
                 remark_v = ""
-                if not checkpoints_df.empty:
-                    cp_match = checkpoints_df[(checkpoints_df["claim_id"] == cid) & (checkpoints_df["checkpoint_date"] == sel_date)]
-                    if not cp_match.empty:
-                        remark_v = cp_match.iloc[-1]["remark"] or ""
+                if not cp_today.empty:
+                    remark_v = cp_today.iloc[-1]["remark"] or ""
                 if not remark_v and is_current_match:
                     remark_v = c["last_remark"] if pd.notna(c["last_remark"]) else ""
                 if str(remark_v).strip().lower() in ("nan", "none"):
                     remark_v = ""
 
-                pay_rows = payments_df[payments_df["claim_id"] == cid] if not payments_df.empty else pd.DataFrame()
+                pay_rows = payments_by_claim.get(cid, empty_df)
                 paid_date_v = pay_rows["payment_date"].max() if not pay_rows.empty else "-"
 
                 day_rows.append({
@@ -931,10 +957,13 @@ with tab_risk:
         st.info("데이터가 없습니다.")
     else:
         today = date.today()
+        empty_df = pd.DataFrame()
+        history_by_claim = {cid: g for cid, g in history_df.groupby("claim_id")} if not history_df.empty else {}
         risk_rows = []
         for _, c in claims_df.iterrows():
             cid = c["id"]
-            hist = history_df[(history_df["claim_id"] == cid) & (history_df["event_type"] == "자동지연")] if not history_df.empty else pd.DataFrame()
+            hist_g = history_by_claim.get(cid, empty_df)
+            hist = hist_g[hist_g["event_type"] == "자동지연"] if not hist_g.empty else empty_df
             delay_count = len(hist)
             delay_days = calc_delay_days(c["original_due_date"], today) if c["status"] != "확인필요" else 0
             sev = claim_severity(delay_count, delay_days)
