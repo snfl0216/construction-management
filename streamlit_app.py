@@ -115,17 +115,17 @@ with engine.connect() as conn:
             conn.execute(text(f"ALTER TABLE site_receivables ADD COLUMN {col_def};"))
             conn.commit()
         except Exception:
-            pass
+            conn.rollback()
     try:
         conn.execute(text("ALTER TABLE claims ADD COLUMN last_remark TEXT;"))
         conn.commit()
     except Exception:
-        pass
+        conn.rollback()
     try:
         conn.execute(text("ALTER TABLE claims ADD COLUMN company_name TEXT;"))
         conn.commit()
     except Exception:
-        pass
+        conn.rollback()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS site_receivable_details (
             id {PK},
