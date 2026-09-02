@@ -596,7 +596,7 @@ if page == "현장별 미수현황":
 
         show_df_final = pd.DataFrame(rows_with_subtotal)[cols]
         render_html_table(show_df_final, money_cols=["총계약금액", "총입금액", "미수잔액"],
-                           col_max_width={"비고": "120px"})
+                           col_max_width={"비고": "150px"}, wrap_cols=["비고"])
 
         st.markdown("## 🔍 현장 상세 내역")
         sel_site = st.selectbox("현장 선택", show_df["현장명"].tolist())
