@@ -14,13 +14,20 @@ ADMIN_PASSWORD = "chdan1576**"
 
 CLAIM_TYPES = ["선급금", "기성금", "중도금", "잔금", "추가금", "정산금", "AS", "시공부자재"]
 
+_db_status = None
+_db_error = None
 try:
     _turso_url = st.secrets["TURSO_DATABASE_URL"].replace("libsql://", "")
     _turso_token = st.secrets["TURSO_AUTH_TOKEN"]
     engine = create_engine(f"sqlite+libsql://{_turso_url}?authToken={_turso_token}&secure=true")
-except Exception:
-    # Turso 접속 정보가 없으면(로컬 테스트 등) 예전처럼 로컬 파일 DB 사용
+    with engine.connect() as _test_conn:
+        _test_conn.execute(text("SELECT 1"))
+    _db_status = "turso"
+except Exception as e:
+    # Turso 접속 실패하면(설정 안 됐거나 오류) 로컬 파일 DB로 대체 — 단, 화면에 표시해서 숨기지 않는다
     engine = create_engine("sqlite:///construction_v6.db")
+    _db_status = "local"
+    _db_error = str(e)
 
 # --------------------------------------------------------------------------
 # DB 초기화 — 두 데이터 파이프라인 완전히 분리
@@ -351,6 +358,11 @@ def run_daily_delay_check():
 
 
 run_daily_delay_check()
+
+if _db_status == "turso":
+    st.sidebar.success("🟢 DB: Turso(클라우드) 연결됨")
+else:
+    st.sidebar.error(f"🔴 DB: 로컬(임시) — Turso 연결 실패\n\n{_db_error}")
 
 st.sidebar.markdown("### 🔐 관리자 로그인")
 pw_input = st.sidebar.text_input("관리자 비밀번호", type="password")
