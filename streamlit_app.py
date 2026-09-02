@@ -475,7 +475,7 @@ page = st.session_state.current_page
 # TAB: 현장별 미수현황  (미수내역 엑셀 미러링)
 # ==========================================================================
 if page == "현장별 미수현황":
-    st.subheader("현장별 미수현황")
+    st.subheader("📋 현장별 미수현황")
     st.caption("미수 잔액이 있는 현장 리스트입니다. (완납되면 목록에서 빠집니다)")
     sr_df = load_table(engine, "site_receivables", "ORDER BY contract_date")
 
@@ -653,7 +653,7 @@ if page == "현장별 미수현황":
 # TAB: 기성청구현황  (일일수금관리=이력 엑셀 기준)
 # ==========================================================================
 elif page == "기성청구현황":
-    st.subheader("기성청구현황")
+    st.subheader("📊 기성청구현황")
     st.caption("일일수금관리 기준 기성 청구 현황입니다. 현장별·담당자별로 입금예정일, 지연 여부 등을 확인할 수 있습니다.")
     view_mode = st.radio("보기 기준", ["현장별", "담당자별"], horizontal=True)
     st.divider()
@@ -794,7 +794,7 @@ elif page == "기성청구현황":
 # TAB: 입금 캘린더 (이력 데이터만)
 # ==========================================================================
 elif page == "입금 캘린더":
-    st.subheader("입금 캘린더")
+    st.subheader("📅 입금 캘린더")
     st.caption("기성 청구된 입금예정 건을 달력으로 확인합니다. 완납(초록)·지연(빨강)·입금대기(회색)로 구분됩니다.")
     claims_df = load_table(
         engine, "claims",
@@ -1019,7 +1019,7 @@ elif page == "입금 캘린더":
 # TAB: 리스크 현장 (이력 데이터만)
 # ==========================================================================
 elif page == "리스크 현장":
-    st.subheader("리스크 현장")
+    st.subheader("🚨 리스크 현장")
     st.caption("완납되지 않은 청구 중 지연 3회 이상이거나 지연일수 30일 이상인 건이 있는 현장. (완납 청구는 제외)")
     claims_df = load_table(engine, "claims", "WHERE status != '완납'")
     history_df = load_table(engine, "claim_delay_history")
@@ -1089,7 +1089,7 @@ elif page == "리스크 현장":
 # TAB: 계약현황 (미수내역 전체 - 활성/완불 구분 없이 계약년월 있는 모든 행)
 # ==========================================================================
 elif page == "계약현황":
-    st.subheader("계약현황 (연도별)")
+    st.subheader("📈 계약현황 (연도별)")
     cs_df = load_table(engine, "contract_status_raw")
 
     if cs_df.empty:
@@ -1227,7 +1227,7 @@ elif page == "계약현황":
 # TAB: 관리자 — 엑셀 업로드 2개만
 # ==========================================================================
 elif page == "관리자":
-    st.subheader("관리자")
+    st.subheader("🔐 관리자")
     if not is_admin:
         st.markdown("### 🔒 관리자 로그인")
         with st.form("admin_login_form"):
