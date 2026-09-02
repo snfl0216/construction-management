@@ -957,7 +957,8 @@ with tab_risk:
             if delay_days >= 30:
                 reasons.append(f"{delay_days}일 지연")
             risk_rows.append({
-                "현장명": c["site_name"], "담당자": c["manager"], "채권종류": c["claim_type"],
+                "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
+                "담당자": c["manager"], "채권종류": c["claim_type"],
                 "청구금액": c["claim_amount"], "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
                 "지연횟수": delay_count, "지연일수": delay_days, "등급": SEVERITY_LABEL[sev], "_sev": sev,
                 "사유": ", ".join(reasons),
