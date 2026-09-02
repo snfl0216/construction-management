@@ -54,6 +54,7 @@ with engine.connect() as conn:
             last_remark TEXT
         );
     """))
+    conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS payments (
             id {PK},
@@ -62,6 +63,7 @@ with engine.connect() as conn:
             payment_amount INTEGER DEFAULT 0
         );
     """))
+    conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claim_delay_history (
             id {PK},
@@ -75,6 +77,7 @@ with engine.connect() as conn:
             reason TEXT
         );
     """))
+    conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claim_checkpoints (
             id {PK},
@@ -84,6 +87,7 @@ with engine.connect() as conn:
             unpaid_balance INTEGER
         );
     """))
+    conn.commit()
     # ===== 현장별 미수관리(미수내역) 기준 : 현장별 미수현황 / 완불현장 / 계약현황 =====
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS site_receivables (
@@ -110,6 +114,7 @@ with engine.connect() as conn:
             status_label TEXT
         );
     """))
+    conn.commit()
     for col_def in ["no_number INTEGER", "division TEXT"]:
         try:
             conn.execute(text(f"ALTER TABLE site_receivables ADD COLUMN {col_def};"))
@@ -136,6 +141,7 @@ with engine.connect() as conn:
             note TEXT
         );
     """))
+    conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS contract_status_raw (
             id {PK},
