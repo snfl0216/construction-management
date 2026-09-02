@@ -189,6 +189,73 @@ def fmt_money(x):
         return str(x)
 
 
+def fmt_eok(won):
+    """1억원 단위로 소수점 둘째자리까지 (예: 8,309,000,000 -> '83.09억')"""
+    try:
+        return f"{won / 1e8:,.2f}억"
+    except (TypeError, ValueError):
+        return "0억"
+
+
+def render_metric_cards(items):
+    """회색 둥근 카드 여러 개를 한 줄로 그린다. items: [(아이콘, 라벨, 값), ...]"""
+    html = "<div style='display:grid;grid-template-columns:repeat(%d,minmax(0,1fr));gap:12px;margin:8px 0 20px 0;'>" % len(items)
+    for icon, label, value in items:
+        html += (
+            "<div style='background:#F1EFE8;border-radius:16px;padding:16px;'>"
+            f"<div style='font-size:13px;color:#5F5E5A;margin-bottom:8px;'>{icon} {label}</div>"
+            f"<div style='font-size:22px;font-weight:700;color:#2C2C2A;'>{value}</div>"
+            "</div>"
+        )
+    html += "</div>"
+    st.markdown(html, unsafe_allow_html=True)
+
+
+PROGRESS_MILESTONES = [(20, "자재발주"), (40, "창호발주"), (60, "창호시공"), (80, "유리시공"), (90, "코킹완료"), (100, "방충망")]
+
+
+def render_progress_milestones(pct):
+    """공정율을 퍼센트 숫자 대신, 자재발주20/창호발주40/창호시공60/유리시공80/코킹완료90/방충망100
+    단계가 표시된 막대로 보여준다."""
+    pct = max(0, min(100, pct))
+    current_label = "시작 전"
+    for m_pct, m_label in PROGRESS_MILESTONES:
+        if pct >= m_pct:
+            current_label = m_label
+
+    ticks_html = ""
+    for m_pct, m_label in PROGRESS_MILESTONES:
+        is_current = (m_label == current_label)
+        color = "var(--text-accent, #185FA5)" if is_current else "#888780"
+        weight = "700" if is_current else "400"
+        if m_pct <= 20:
+            transform = "translateX(0)"
+        elif m_pct >= 100:
+            transform = "translateX(-100%)"
+        else:
+            transform = "translateX(-50%)"
+        ticks_html += (
+            f"<div style='position:absolute;left:{m_pct}%;top:0;width:1px;height:8px;"
+            f"background:{'var(--text-accent, #185FA5)' if is_current else '#ccc'};'></div>"
+            f"<div style='position:absolute;left:{m_pct}%;top:12px;transform:{transform};"
+            f"font-size:11px;color:{color};font-weight:{weight};white-space:nowrap;'>{m_label} {m_pct}%</div>"
+        )
+
+    html = f"""
+    <div style='background:var(--surface-2);border-radius:16px;border:0.5px solid var(--border);padding:20px;margin-bottom:20px;'>
+        <div style='font-size:14px;font-weight:700;margin-bottom:6px;'>공정율 진행 단계</div>
+        <div style='font-size:12px;color:var(--text-secondary);margin-bottom:28px;'>현재 {pct}% · {current_label} 단계</div>
+        <div style='position:relative;height:10px;background:var(--surface-1);border-radius:999px;margin:0 4px 8px 4px;'>
+            <div style='position:absolute;left:0;top:0;height:10px;width:{pct}%;background:var(--fill-accent, #378ADD);border-radius:999px;'></div>
+            <div style='position:absolute;left:{pct}%;top:-5px;width:20px;height:20px;margin-left:-10px;
+                        border-radius:50%;background:var(--surface-2);border:3px solid var(--fill-accent, #378ADD);'></div>
+        </div>
+        <div style='position:relative;height:34px;margin:0 4px;'>{ticks_html}</div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def to_won_from_thousands(v):
     """미수내역 엑셀은 금액이 '천원' 단위로 저장돼있어 *1000 해야 하는데,
     int(v)*1000처럼 먼저 정수로 자르고 곱하면 소수점(600원 단위 등)이 통째로 날아간다.
@@ -404,11 +471,12 @@ with tab_receivable:
     else:
         active_df = sr_df[sr_df["is_active"] == 1].copy()
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("활성 현장 수", f"{len(active_df)}개")
-        c2.metric("총 계약금액(부가세 포함)", f"{active_df['contract_amount'].sum():,} 원")
-        c3.metric("총 입금액(부가세 포함)", f"{active_df['total_paid'].sum():,} 원")
-        c4.metric("총 미수잔액(부가세 포함)", f"{active_df['unpaid_balance'].sum():,} 원")
+        render_metric_cards([
+            ("🏢", "활성 현장 수", f"{len(active_df)}개"),
+            ("📄", "총 계약금액(부가세 포함)", fmt_eok(active_df["contract_amount"].sum())),
+            ("💰", "총 입금액(부가세 포함)", fmt_eok(active_df["total_paid"].sum())),
+            ("⚠️", "총 미수잔액(부가세 포함)", fmt_eok(active_df["unpaid_balance"].sum())),
+        ])
 
         st.divider()
         st.markdown("#### 🔍 필터")
@@ -445,10 +513,11 @@ with tab_receivable:
 
         st.caption(f"{len(filtered_df)}개 현장 표시 중")
 
-        dc1, dc2, dc3 = st.columns(3)
-        dc1.metric("계약금액 합계(부가세 포함)", f"{filtered_df['contract_amount'].sum():,} 원")
-        dc2.metric("입금액 합계(부가세 포함)", f"{filtered_df['total_paid'].sum():,} 원")
-        dc3.metric("미수잔액 합계(부가세 포함)", f"{filtered_df['unpaid_balance'].sum():,} 원")
+        render_metric_cards([
+            ("📄", "계약금액 합계(부가세 포함)", fmt_eok(filtered_df["contract_amount"].sum())),
+            ("💰", "입금액 합계(부가세 포함)", fmt_eok(filtered_df["total_paid"].sum())),
+            ("⚠️", "미수잔액 합계(부가세 포함)", fmt_eok(filtered_df["unpaid_balance"].sum())),
+        ])
 
         st.divider()
         disp = filtered_df.rename(columns={
@@ -530,10 +599,12 @@ with tab_receivable:
                 "착공일": row["start_date"] or "-",
                 "총계약금(변경포함)": row["contract_amount"],
                 "변경계약": row["change_amount"], "미수잔액": row["unpaid_balance"],
-                "공정율(%)": round(row["progress_rate"] * 100), "기성율(%)": round(row["invoice_progress_rate"] * 100),
+                "기성율(%)": round(row["invoice_progress_rate"] * 100),
                 "담당자": row["manager"],
             }])
             render_html_table(summary_df, money_cols=["총계약금(변경포함)", "변경계약", "미수잔액"])
+
+            render_progress_milestones(round(row["progress_rate"] * 100))
 
             detail_df = load_site_detail(engine, int(row["id"]))
             if detail_df.empty:
@@ -632,10 +703,10 @@ with tab_progress:
 
             def colorize_status(s):
                 if s in ("지연중", "일부입금(지연)"):
-                    return f"<span style='color:#c0392b;font-weight:600;'>{s}</span>"
+                    return f"<span style='background:#FCEBEB;color:#A32D2D;border-radius:999px;padding:2px 10px;font-size:12px;'>{s}</span>"
                 if s == "확인필요":
-                    return f"<span style='color:#b7950b;font-weight:600;'>{s}</span>"
-                return s
+                    return f"<span style='background:#FAEEDA;color:#854F0B;border-radius:999px;padding:2px 10px;font-size:12px;'>{s}</span>"
+                return f"<span style='background:#E6F1FB;color:#185FA5;border-radius:999px;padding:2px 10px;font-size:12px;'>{s}</span>"
 
             cols_bysite = ["현장명", "업체명", "담당자", "채권종류", "최초예정일", "입금예정일", "청구금액", "입금액", "미수잔액", "지연횟수", "총지연일수", "상태"]
             show = disp[cols_bysite]
@@ -895,11 +966,11 @@ with tab_calendar:
                     status_label, sort_rank = ("지연중", 1) if delay_days > 0 else ("입금대기", 2)
 
                 if status_label == "완납":
-                    status_html = f"<span style='background:#e6f7ec;color:#1e7e34;padding:2px 8px;border-radius:4px;'>{status_label}</span>"
+                    status_html = f"<span style='background:#EAF3DE;color:#27500A;border-radius:999px;padding:2px 10px;font-size:12px;'>{status_label}</span>"
                 elif "지연" in status_label:
-                    status_html = f"<span style='background:#fdecea;color:#c0392b;padding:2px 8px;border-radius:4px;'>{status_label}</span>"
+                    status_html = f"<span style='background:#FCEBEB;color:#A32D2D;border-radius:999px;padding:2px 10px;font-size:12px;'>{status_label}</span>"
                 else:
-                    status_html = status_label
+                    status_html = f"<span style='background:#E6F1FB;color:#185FA5;border-radius:999px;padding:2px 10px;font-size:12px;'>{status_label}</span>"
 
                 # 그 날짜(sel_d)에 실제로 적혀있던 비고를 그대로 찾아서 붙인다 (최신 비고로 통일하지 않음)
                 remark_v = ""
@@ -973,16 +1044,31 @@ with tab_risk:
         else:
             risk_df = pd.DataFrame(risk_rows)
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("리스크 현장 수", f"{risk_df['현장명'].nunique()}개")
-            c2.metric("심각 등급 현장", f"{(risk_df.groupby('현장명')['_sev'].max() == 3).sum()}개")
-            c3.metric("리스크 청구 건수", f"{len(risk_df)}건")
+            render_metric_cards([
+                ("🏢", "리스크 현장 수", f"{risk_df['현장명'].nunique()}개"),
+                ("🔴", "심각 등급 현장", f"{(risk_df.groupby('현장명')['_sev'].max() == 3).sum()}개"),
+                ("🧾", "리스크 청구 건수", f"{len(risk_df)}건"),
+            ])
 
             st.divider()
             st.markdown("#### 리스크 청구 상세")
-            display_risk = risk_df.sort_values(["_sev", "지연일수"], ascending=[False, False]).drop(columns=["_sev"])
+            display_risk = risk_df.sort_values(["_sev", "지연일수"], ascending=[False, False]).copy()
+
+            SEV_PLAIN = {1: "주의", 2: "경고", 3: "심각"}
+            SEV_BADGE = {
+                1: "<span style='background:#F7C1C1;color:#791F1F;border-radius:999px;padding:2px 10px;font-size:12px;'>주의</span>",
+                2: "<span style='background:#E24B4A;color:#fff;border-radius:999px;padding:2px 10px;font-size:12px;'>경고</span>",
+                3: "<span style='background:#791F1F;color:#fff;border-radius:999px;padding:2px 10px;font-size:12px;'>심각</span>",
+            }
+            csv_export = display_risk.copy()
+            csv_export["등급"] = csv_export["_sev"].map(SEV_PLAIN)
+            csv_export = csv_export.drop(columns=["_sev"])
+
+            display_risk["등급"] = display_risk["_sev"].map(SEV_BADGE)
+            display_risk = display_risk.drop(columns=["_sev"])
+
             render_html_table(display_risk, money_cols=["청구금액"])
-            st.download_button("📥 CSV 다운로드", display_risk.to_csv(index=False).encode("utf-8-sig"),
+            st.download_button("📥 CSV 다운로드", csv_export.to_csv(index=False).encode("utf-8-sig"),
                                 file_name=f"리스크현장_{date.today()}.csv", mime="text/csv")
 
 # ==========================================================================
