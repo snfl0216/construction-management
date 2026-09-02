@@ -1,0 +1,16 @@
+name: Keep Streamlit App Awake
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # 한국시간 18:00 (오후 6시)
+    - cron: '0 15 * * *'  # 한국시간 00:00 (자정, 다음날 UTC 계산상 15:00)
+    - cron: '0 21 * * *'  # 한국시간 06:00 (다음날 UTC 계산상 21:00)
+  workflow_dispatch:       # 필요하면 Actions 탭에서 수동으로도 실행 가능
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 사이트 접속해서 깨우기
+        run: |
+          curl -sS -o /dev/null -w "응답 코드: %{http_code}\n" https://consmanager.streamlit.app/
