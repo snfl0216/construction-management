@@ -1182,7 +1182,11 @@ with tab_admin:
                     for _, grp_raw in groups:
                         # 채권명이 같아도(현장+업체+구분+금액 우연히 동일), 중간에 미수잔액이 0으로
                         # 완전히 끝났다가 이후에 다시 미수금이 생기면 별개의 새 채권으로 취급해서 쪼갠다.
-                        grp_phys = grp_raw.sort_index()
+                        # 이때 반드시 '진짜 시간 순서'(입금예정일, 같으면 입금완료 행을 나중으로)로 봐야 한다 —
+                        # 엑셀에서 사용자가 행을 정렬/이동하면 물리적 위치는 시간 순서와 달라질 수 있기 때문.
+                        grp_tmp = grp_raw.copy()
+                        grp_tmp["_paid_flag_priority"] = (grp_tmp.get("paid_flag", "").astype(str).str.upper() == "Y").astype(int)
+                        grp_phys = grp_tmp.sort_values(["_due_sort", "_paid_flag_priority"], na_position="last")
                         episodes = []
                         cur_ep = []
                         for _, r in grp_phys.iterrows():
