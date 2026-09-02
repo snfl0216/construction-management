@@ -14,25 +14,17 @@ ADMIN_PASSWORD = "chdan1576**"
 
 CLAIM_TYPES = ["선급금", "기성금", "중도금", "잔금", "추가금", "정산금", "AS", "시공부자재"]
 
-@st.cache_resource
-def get_engine():
-    """DB 연결은 앱이 켜져있는 동안 딱 한 번만 만든다."""
-    return create_engine("sqlite:////tmp/construction_v6.db")
-
-
-engine = get_engine()
+engine = create_engine("sqlite:////tmp/construction_v6.db")
 PK = "INTEGER PRIMARY KEY AUTOINCREMENT"
 
 # --------------------------------------------------------------------------
 # DB 초기화 — 두 데이터 파이프라인 완전히 분리 (이것도 앱 켜져있는 동안 딱 한 번만 실행)
 # --------------------------------------------------------------------------
-@st.cache_resource
-def init_schema(_engine, pk):
-  with _engine.connect() as conn:
+with engine.connect() as conn:
     # ===== 일일수금관리(이력) 기준 : 기성청구현황 / 캘린더 / 리스크현장 =====
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claims (
-            id {pk},
+            id {PK},
             site_name TEXT,
             company_name TEXT,
             manager TEXT,
@@ -49,7 +41,7 @@ def init_schema(_engine, pk):
     conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS payments (
-            id {pk},
+            id {PK},
             claim_id INTEGER,
             payment_date TEXT,
             payment_amount BIGINT DEFAULT 0
@@ -58,7 +50,7 @@ def init_schema(_engine, pk):
     conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claim_delay_history (
-            id {pk},
+            id {PK},
             claim_id INTEGER,
             event_type TEXT,
             changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -72,7 +64,7 @@ def init_schema(_engine, pk):
     conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS claim_checkpoints (
-            id {pk},
+            id {PK},
             claim_id INTEGER,
             checkpoint_date TEXT,
             remark TEXT,
@@ -83,7 +75,7 @@ def init_schema(_engine, pk):
     # ===== 현장별 미수관리(미수내역) 기준 : 현장별 미수현황 / 완불현장 / 계약현황 =====
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS site_receivables (
-            id {pk},
+            id {PK},
             no_number INTEGER,
             division TEXT,
             site_name TEXT,
@@ -125,7 +117,7 @@ def init_schema(_engine, pk):
         conn.rollback()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS site_receivable_details (
-            id {pk},
+            id {PK},
             site_receivable_id INTEGER,
             detail_type TEXT,
             detail_date TEXT,
@@ -136,7 +128,7 @@ def init_schema(_engine, pk):
     conn.commit()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS contract_status_raw (
-            id {pk},
+            id {PK},
             year INTEGER,
             label TEXT,
             m1 REAL, m2 REAL, m3 REAL, m4 REAL, m5 REAL, m6 REAL,
@@ -145,9 +137,6 @@ def init_schema(_engine, pk):
         );
     """))
     conn.commit()
-
-
-init_schema(engine, PK)
 
 # --------------------------------------------------------------------------
 # 공용 함수
