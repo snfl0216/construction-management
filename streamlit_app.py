@@ -6,8 +6,8 @@ from datetime import datetime, date
 import io
 import calendar as pycal
 
-st.set_page_config(page_title="건설 현장 정산 & 지연 관리 시스템", layout="wide")
-st.title("🏗️ 건설 현장 정산 & 지연 관리 시스템")
+st.set_page_config(page_title="현장 미수관리 시스템", layout="wide")
+st.title("현장 미수관리 시스템")
 
 # ⚠️ 관리자 비밀번호
 ADMIN_PASSWORD = "chdan1576**"
