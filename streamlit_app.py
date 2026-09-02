@@ -7,7 +7,6 @@ import io
 import calendar as pycal
 
 st.set_page_config(page_title="현장 미수관리 시스템", layout="wide")
-st.title("현장 미수관리 시스템")
 
 # ⚠️ 관리자 비밀번호
 ADMIN_PASSWORD = "chdan1576**"
@@ -462,6 +461,11 @@ if "current_page" not in st.session_state:
 
 with st.sidebar:
     st.markdown("<div style='height:120px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div style='color:var(--text-muted, #888780);font-size:14px;font-weight:600;"
+        "margin-bottom:12px;'>현장 미수관리 시스템</div>",
+        unsafe_allow_html=True
+    )
     for p in PAGES:
         is_current = st.session_state.current_page == p
         if st.button(f"{PAGE_ICONS[p]}  {p}", use_container_width=True,
