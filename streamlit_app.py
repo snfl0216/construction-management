@@ -462,8 +462,8 @@ if "current_page" not in st.session_state:
 with st.sidebar:
     st.markdown("<div style='height:120px;'></div>", unsafe_allow_html=True)
     st.markdown(
-        "<div style='color:var(--text-muted, #888780);font-size:14px;font-weight:600;"
-        "margin-bottom:12px;'>현장 미수관리 시스템</div>",
+        "<div style='color:#000;font-size:24px;font-weight:700;"
+        "margin-bottom:28px;'>현장 미수관리 시스템</div>",
         unsafe_allow_html=True
     )
     for p in PAGES:
