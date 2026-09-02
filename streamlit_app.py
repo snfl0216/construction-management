@@ -1307,16 +1307,25 @@ with tab_admin:
                                         "pd": pdate_final.isoformat(), "dd": delay_days,
                                     })
 
-                    # ---- 여기서부터 실제 DB 왕복: claims는 한 번에 다 넣고 id를 순서대로 받아온다 ----
+                    # ---- 여기서부터 실제 DB 왕복: claims를 여러 줄짜리 INSERT 하나로 통째로 보내고,
+                    #      id들을 넣은 순서 그대로 한 번에 돌려받는다 (건마다 왕복하던 게 진짜 병목이었음) ----
                     claim_ids = []
                     if claims_batch:
-                        for cb in claims_batch:
-                            res = conn.execute(text("""
-                                INSERT INTO claims (site_name, company_name, manager, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status, last_remark)
-                                VALUES (:sn, :cn, :mg, :ctype, :cdate, :odue, :cdue, :amt, :status, :remark)
-                                RETURNING id
-                            """), cb)
-                            claim_ids.append(res.scalar())
+                        value_clauses = []
+                        params = {}
+                        for idx, cb in enumerate(claims_batch):
+                            value_clauses.append(
+                                f"(:sn{idx}, :cn{idx}, :mg{idx}, :ctype{idx}, :cdate{idx}, :odue{idx}, :cdue{idx}, :amt{idx}, :status{idx}, :remark{idx})"
+                            )
+                            for k, v in cb.items():
+                                params[f"{k}{idx}"] = v
+                        sql = f"""
+                            INSERT INTO claims (site_name, company_name, manager, claim_type, claim_date, original_due_date, current_due_date, claim_amount, status, last_remark)
+                            VALUES {",".join(value_clauses)}
+                            RETURNING id
+                        """
+                        res = conn.execute(text(sql), params)
+                        claim_ids = [row[0] for row in res.fetchall()]
 
                     # 자식 테이블들은 claim_idx를 실제 claim_id로 치환한 다음, 테이블당 딱 한 번씩만 왕복해서 넣는다
                     history_rows = []
@@ -1430,7 +1439,8 @@ with tab_admin:
 
                     n_sites = 0
                     i = 0
-                    details_batch = []
+                    sites_batch = []
+                    details_batch_raw = []  # site_idx(임시 순번) 기준, 나중에 진짜 site_id로 치환
                     while i < len(rows):
                         r = rows[i]
                         if r[7]:  # 공사명
@@ -1458,14 +1468,7 @@ with tab_admin:
                             if branch_v in ("해외", "대리점"):
                                 division_v = branch_v  # 지사가 해외/대리점이면 구분(F열)보다 우선
 
-                            res = conn.execute(text("""
-                                INSERT INTO site_receivables
-                                (no_number, division, site_name, company_name, manager, branch, contract_code, contract_date, start_date,
-                                 completion_date, contract_yearmonth, contract_amount, change_amount, total_paid,
-                                 unpaid_balance, progress_rate, invoice_progress_rate, invoice_issue_rate, is_active, status_label)
-                                VALUES (:no,:div,:sn,:cn,:mg,:br,:cc,:cd,:sd,:ed,:ym,:ca,:cha,:tp,:ub,:pr,:ipr,:iir,:ia,:sl)
-                                RETURNING id
-                            """), {
+                            sites_batch.append({
                                 "no": int(r[6]) if isinstance(r[6], (int, float)) else None,
                                 "div": division_v,
                                 "sn": r[7], "cn": r[8] or "", "mg": r[24] or "", "br": branch_v,
@@ -1478,27 +1481,55 @@ with tab_admin:
                                 "iir": float(r[21]) if isinstance(r[21], (int, float)) else 0,
                                 "ia": is_active, "sl": status_label,
                             })
-                            site_id = res.scalar()
+                            site_idx = len(sites_batch) - 1
 
                             j = i + 1
                             while j < len(rows) and not is_blank(rows[j]) and rows[j][7] is None:
                                 d = rows[j]
                                 # 변경계약: col11=날짜, col12=문서종류, col15=금액
                                 if isinstance(d[11], datetime) and isinstance(d[15], (int, float)) and d[15]:
-                                    details_batch.append({"sid": site_id, "dtype": "변경계약", "dt": to_date_s(d[11]),
-                                                           "amt": to_won_from_thousands(d[15]), "note": d[12] or ""})
+                                    details_batch_raw.append({"site_idx": site_idx, "dtype": "변경계약", "dt": to_date_s(d[11]),
+                                                               "amt": to_won_from_thousands(d[15]), "note": d[12] or ""})
                                 # 계산서: col28=발행일, col29=발행액
                                 if isinstance(d[28], datetime) and isinstance(d[29], (int, float)) and d[29]:
-                                    details_batch.append({"sid": site_id, "dtype": "계산서", "dt": to_date_s(d[28]),
-                                                           "amt": to_won_from_thousands(d[29]), "note": ""})
+                                    details_batch_raw.append({"site_idx": site_idx, "dtype": "계산서", "dt": to_date_s(d[28]),
+                                                               "amt": to_won_from_thousands(d[29]), "note": ""})
                                 # 입금: col31=입금일, col32=입금액
                                 if isinstance(d[31], datetime) and isinstance(d[32], (int, float)) and d[32]:
-                                    details_batch.append({"sid": site_id, "dtype": "입금", "dt": to_date_s(d[31]),
-                                                           "amt": to_won_from_thousands(d[32]), "note": ""})
+                                    details_batch_raw.append({"site_idx": site_idx, "dtype": "입금", "dt": to_date_s(d[31]),
+                                                               "amt": to_won_from_thousands(d[32]), "note": ""})
                                 j += 1
                             i = j
                         else:
                             i += 1
+
+                    # ---- 여기서부터 실제 DB 왕복: 현장을 여러 줄짜리 INSERT 하나로 통째로 보내고 id를 한 번에 받아온다 ----
+                    site_ids = []
+                    if sites_batch:
+                        value_clauses = []
+                        params = {}
+                        for idx, sb in enumerate(sites_batch):
+                            value_clauses.append(
+                                f"(:no{idx},:div{idx},:sn{idx},:cn{idx},:mg{idx},:br{idx},:cc{idx},:cd{idx},:sd{idx},:ed{idx},"
+                                f":ym{idx},:ca{idx},:cha{idx},:tp{idx},:ub{idx},:pr{idx},:ipr{idx},:iir{idx},:ia{idx},:sl{idx})"
+                            )
+                            for k, v in sb.items():
+                                params[f"{k}{idx}"] = v
+                        sql = f"""
+                            INSERT INTO site_receivables
+                            (no_number, division, site_name, company_name, manager, branch, contract_code, contract_date, start_date,
+                             completion_date, contract_yearmonth, contract_amount, change_amount, total_paid,
+                             unpaid_balance, progress_rate, invoice_progress_rate, invoice_issue_rate, is_active, status_label)
+                            VALUES {",".join(value_clauses)}
+                            RETURNING id
+                        """
+                        res = conn.execute(text(sql), params)
+                        site_ids = [row[0] for row in res.fetchall()]
+
+                    details_batch = [
+                        {"sid": site_ids[d["site_idx"]], "dtype": d["dtype"], "dt": d["dt"], "amt": d["amt"], "note": d["note"]}
+                        for d in details_batch_raw
+                    ]
 
                     if details_batch:
                         conn.execute(text("""
