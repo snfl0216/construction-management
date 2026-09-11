@@ -1023,7 +1023,7 @@ elif page == "입금 캘린더":
 # ==========================================================================
 elif page == "리스크 현장":
     st.subheader("🚨 리스크 현장")
-    st.caption("완납되지 않은 청구 중 지연 3회 이상이거나 지연일수 30일 이상인 건이 있는 현장. (완납 청구는 제외)")
+    st.caption("완납되지 않은 청구 중 지연 3회 이상이거나 지연일수 30일 이상인 건, 또는 입금예정일이 미확인인 건이 있는 현장. (완납 청구는 제외)")
     claims_df = load_table(engine, "claims", "WHERE status != '완납'")
     history_df = load_table(engine, "claim_delay_history")
 
@@ -1039,7 +1039,20 @@ elif page == "리스크 현장":
             hist_g = history_by_claim.get(cid, empty_df)
             hist = hist_g[hist_g["event_type"] == "자동지연"] if not hist_g.empty else empty_df
             delay_count = len(hist)
-            delay_days = calc_delay_days(c["original_due_date"], today) if c["status"] != "확인필요" else 0
+
+            if c["status"] == "확인필요":
+                # 입금예정일 자체가 "미확인"이라 지연일수를 계산할 수 없는 건 — 심각도 등급이 아니라
+                # 별도의 "확인필요" 항목으로 리스크 목록에 포함시킨다.
+                risk_rows.append({
+                    "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
+                    "담당자": c["manager"], "채권종류": c["claim_type"],
+                    "청구금액": c["claim_amount"], "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
+                    "지연횟수": delay_count, "지연일수": 0, "등급": None, "_sev": -1,
+                    "사유": "입금일정 확인 필요",
+                })
+                continue
+
+            delay_days = calc_delay_days(c["original_due_date"], today)
             sev = claim_severity(delay_count, delay_days)
             if sev == 0:
                 continue
@@ -1071,8 +1084,9 @@ elif page == "리스크 현장":
             st.markdown("#### 리스크 청구 상세")
             display_risk = risk_df.sort_values(["_sev", "지연일수"], ascending=[False, False]).copy()
 
-            SEV_PLAIN = {1: "주의", 2: "경고", 3: "심각"}
+            SEV_PLAIN = {-1: "확인필요", 1: "주의", 2: "경고", 3: "심각"}
             SEV_BADGE = {
+                -1: "<span style='background:#FAEEDA;color:#854F0B;border-radius:999px;padding:2px 10px;font-size:12px;'>확인필요</span>",
                 1: "<span style='background:#F7C1C1;color:#791F1F;border-radius:999px;padding:2px 10px;font-size:12px;'>주의</span>",
                 2: "<span style='background:#E24B4A;color:#fff;border-radius:999px;padding:2px 10px;font-size:12px;'>경고</span>",
                 3: "<span style='background:#791F1F;color:#fff;border-radius:999px;padding:2px 10px;font-size:12px;'>심각</span>",
