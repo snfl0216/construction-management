@@ -1040,27 +1040,30 @@ elif page == "리스크 현장":
             hist = hist_g[hist_g["event_type"] == "자동지연"] if not hist_g.empty else empty_df
             delay_count = len(hist)
 
-            if c["status"] == "확인필요":
-                # 입금예정일 자체가 "미확인"이라 지연일수를 계산할 수 없는 건 — 심각도 등급이 아니라
-                # 별도의 "확인필요" 항목으로 리스크 목록에 포함시킨다.
-                risk_rows.append({
-                    "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
-                    "담당자": c["manager"], "채권종류": c["claim_type"],
-                    "청구금액": c["claim_amount"], "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
-                    "지연횟수": delay_count, "지연일수": 0, "등급": None, "_sev": -1,
-                    "사유": "입금일정 확인 필요",
-                })
-                continue
-
+            # 입금예정일이 "미확인"이어도 최초예정일 기준 지연일수/횟수는 계산 가능하므로 항상 계산한다.
             delay_days = calc_delay_days(c["original_due_date"], today)
             sev = claim_severity(delay_count, delay_days)
+            is_unconfirmed = c["status"] == "확인필요"
+
             if sev == 0:
+                if is_unconfirmed:
+                    # 지연 기준(3회/30일)에는 못 미치지만, 예정일 자체가 미확인인 건은 별도로 남겨둔다.
+                    risk_rows.append({
+                        "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
+                        "담당자": c["manager"], "채권종류": c["claim_type"],
+                        "청구금액": c["claim_amount"], "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
+                        "지연횟수": delay_count, "지연일수": delay_days, "등급": None, "_sev": -1,
+                        "사유": "입금일정 확인 필요",
+                    })
                 continue
+
             reasons = []
             if delay_count >= 3:
                 reasons.append(f"지연 {delay_count}회")
             if delay_days >= 30:
                 reasons.append(f"{delay_days}일 지연")
+            if is_unconfirmed:
+                reasons.append("입금일정 미확인")
             risk_rows.append({
                 "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
                 "담당자": c["manager"], "채권종류": c["claim_type"],
