@@ -1026,6 +1026,7 @@ elif page == "리스크 현장":
     st.caption("완납되지 않은 청구 중 지연 3회 이상이거나 지연일수 30일 이상인 건, 또는 입금예정일이 미확인인 건이 있는 현장. (완납 청구는 제외)")
     claims_df = load_table(engine, "claims", "WHERE status != '완납'")
     history_df = load_table(engine, "claim_delay_history")
+    payments_df = load_table(engine, "payments")
 
     if claims_df.empty:
         st.info("데이터가 없습니다.")
@@ -1033,12 +1034,16 @@ elif page == "리스크 현장":
         today = date.today()
         empty_df = pd.DataFrame()
         history_by_claim = {cid: g for cid, g in history_df.groupby("claim_id")} if not history_df.empty else {}
+        payments_by_claim = {cid: g for cid, g in payments_df.groupby("claim_id")} if not payments_df.empty else {}
         risk_rows = []
         for _, c in claims_df.iterrows():
             cid = c["id"]
             hist_g = history_by_claim.get(cid, empty_df)
             hist = hist_g[hist_g["event_type"] == "자동지연"] if not hist_g.empty else empty_df
             delay_count = len(hist)
+            pay_g = payments_by_claim.get(cid, empty_df)
+            paid = pay_g["payment_amount"].sum() if not pay_g.empty else 0
+            unpaid_amt = (c["claim_amount"] or 0) - paid
 
             # 입금예정일이 "미확인"이어도 최초예정일 기준 지연일수/횟수는 계산 가능하므로 항상 계산한다.
             delay_days = calc_delay_days(c["original_due_date"], today)
@@ -1051,7 +1056,7 @@ elif page == "리스크 현장":
                     risk_rows.append({
                         "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
                         "담당자": c["manager"], "채권종류": c["claim_type"],
-                        "청구금액": c["claim_amount"], "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
+                        "미수잔액": unpaid_amt, "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
                         "지연횟수": delay_count, "지연일수": delay_days, "등급": None, "_sev": -1,
                         "사유": "입금일정 확인 필요",
                     })
@@ -1067,7 +1072,7 @@ elif page == "리스크 현장":
             risk_rows.append({
                 "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
                 "담당자": c["manager"], "채권종류": c["claim_type"],
-                "청구금액": c["claim_amount"], "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
+                "미수잔액": unpaid_amt, "최초예정일": c["original_due_date"], "입금예정일": c["current_due_date"],
                 "지연횟수": delay_count, "지연일수": delay_days, "등급": SEVERITY_LABEL[sev], "_sev": sev,
                 "사유": ", ".join(reasons),
             })
@@ -1101,7 +1106,7 @@ elif page == "리스크 현장":
             display_risk["등급"] = display_risk["_sev"].map(SEV_BADGE)
             display_risk = display_risk.drop(columns=["_sev"])
 
-            render_html_table(display_risk, money_cols=["청구금액"])
+            render_html_table(display_risk, money_cols=["미수잔액"])
             st.download_button("📥 CSV 다운로드", csv_export.to_csv(index=False).encode("utf-8-sig"),
                                 file_name=f"리스크현장_{date.today()}.csv", mime="text/csv")
 
