@@ -1343,9 +1343,10 @@ elif page == "관리자":
                             orig_due = safe_date(first.get("original_due_date")) or safe_date(first.get("current_due_date"))
                             orig_due_str = orig_due.isoformat() if orig_due else None
 
-                            valid_date_rows = grp[grp["_due_sort"].notna()]
-                            last_valid_row = valid_date_rows.iloc[-1] if not valid_date_rows.empty else last
-                            cur_due = safe_date(last_valid_row.get("current_due_date"))
+                            # 정렬상 가장 마지막 행(last)이 곧 '가장 최근 업데이트'다. 여기서 굳이 날짜가
+                            # 파싱되는 행만 골라 쓰면, "예전엔 날짜가 있었는데 최근에 미확인으로 바뀐" 경우를
+                            # 무시하고 옛날 날짜를 써버리는 오류가 생긴다 (미확인도 엄연히 최신 상태이므로 존중한다).
+                            cur_due = safe_date(last.get("current_due_date"))
                             cur_due_str = cur_due.isoformat() if cur_due else None
                             status_raw = str(last.get("status_raw", "") or "")
 
@@ -1358,7 +1359,7 @@ elif page == "관리자":
 
                             # 이력 로그를 그냥 다 더하면, 나중에 취소/정정된 입금까지 합산돼서 완납으로 잘못 판정될 수 있다.
                             # 그래서 "지금 이 순간 미수잔액이 얼마인가"를 이력의 마지막 줄에서 직접 읽어와 그걸 진실로 삼는다.
-                            sheet_unpaid_raw = last_valid_row.get("sheet_unpaid_balance", None)
+                            sheet_unpaid_raw = last.get("sheet_unpaid_balance", None)
                             if pd.notna(sheet_unpaid_raw):
                                 sheet_unpaid = parse_amount(sheet_unpaid_raw)
                                 total_paid = max(0, claim_amount - sheet_unpaid)
