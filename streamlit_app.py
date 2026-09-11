@@ -1287,6 +1287,8 @@ elif page == "관리자":
                         col_map[c] = "payment_date_raw"
                 raw_df = raw_df.rename(columns={k: v for k, v in col_map.items() if k in raw_df.columns})
                 raw_df = raw_df.dropna(subset=["bond_name"]) if "bond_name" in raw_df.columns else raw_df.dropna(subset=["site_name"])
+                if "site_name" in raw_df.columns:
+                    raw_df = raw_df.dropna(subset=["site_name"])
                 raw_df["_due_sort"] = pd.to_datetime(raw_df.get("current_due_date"), errors="coerce")
 
                 with engine.connect() as conn:
