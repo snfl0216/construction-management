@@ -686,7 +686,7 @@ elif page == "기성청구현황":
                 ref_date = (safe_date(pay_rows.iloc[-1]["payment_date"]) if not pay_rows.empty else today) or today
             else:
                 ref_date = today
-            delay_days = calc_delay_days(c["original_due_date"], ref_date) if c["status"] != "확인필요" else 0
+            delay_days = calc_delay_days(c["original_due_date"], ref_date)
             claim_rows.append({
                 "id": cid, "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
                 "담당자": c["manager"], "채권종류": c["claim_type"],
@@ -969,7 +969,7 @@ elif page == "입금 캘린더":
                     continue
 
                 delay_count = len(hist_all)
-                delay_days = calc_delay_days(c["original_due_date"], today) if c["status"] != "확인필요" else 0
+                delay_days = calc_delay_days(c["original_due_date"], today)
 
                 if is_checkpoint_match:
                     status_label, sort_rank = "지연중", 1
@@ -1399,13 +1399,15 @@ elif page == "관리자":
                             prev_due = orig_due
                             for _, r in grp.iterrows():
                                 this_due = safe_date(r.get("current_due_date"))
-                                if this_due and prev_due and this_due != prev_due:
+                                if this_due != prev_due:
+                                    ddays = (this_due - prev_due).days if (this_due and prev_due) else 0
                                     history_batch.append({
-                                        "claim_idx": claim_idx, "old": prev_due.isoformat(), "new": this_due.isoformat(),
-                                        "ddays": (this_due - prev_due).days,
+                                        "claim_idx": claim_idx,
+                                        "old": prev_due.isoformat() if prev_due else None,
+                                        "new": this_due.isoformat() if this_due else None,
+                                        "ddays": ddays,
                                     })
-                                if this_due:
-                                    prev_due = this_due
+                                prev_due = this_due
 
                                 # 이 행 자체의 예정일 + 그 행에 적힌 비고를 그대로 체크포인트로 남긴다
                                 # (달력에서 특정 날짜를 볼 때, 그날 실제로 적혀있던 비고를 그대로 보여주기 위함)
