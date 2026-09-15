@@ -1396,10 +1396,11 @@ elif page == "관리자":
                             claim_idx = len(claims_batch) - 1  # 이 배치 안에서의 임시 순번 (나중에 실제 id로 치환)
                             n_claims += 1
 
-                            prev_due = orig_due
+                            prev_due = None
+                            is_first_row = True
                             for _, r in grp.iterrows():
                                 this_due = safe_date(r.get("current_due_date"))
-                                if this_due != prev_due:
+                                if not is_first_row and this_due != prev_due:
                                     ddays = (this_due - prev_due).days if (this_due and prev_due) else 0
                                     history_batch.append({
                                         "claim_idx": claim_idx,
@@ -1408,6 +1409,7 @@ elif page == "관리자":
                                         "ddays": ddays,
                                     })
                                 prev_due = this_due
+                                is_first_row = False
 
                                 # 이 행 자체의 예정일 + 그 행에 적힌 비고를 그대로 체크포인트로 남긴다
                                 # (달력에서 특정 날짜를 볼 때, 그날 실제로 적혀있던 비고를 그대로 보여주기 위함)
