@@ -1395,7 +1395,7 @@ elif page == "지연현황 보고서":
                     "입금예정일": d.isoformat(), "결과": result,
                     "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
                     "담당자": c["manager"], "채권종류": c["claim_type"],
-                    "미수잔액": unpaid, "최초예정일": c["original_due_date"],
+                    "미수잔액": (c["claim_amount"] or 0), "최초예정일": c["original_due_date"],
                     "지연횟수": delay_count, "총지연일수": delay_days_total,
                 })
 
@@ -1405,8 +1405,9 @@ elif page == "지연현황 보고서":
             rep_df = pd.DataFrame(report_rows).sort_values(
                 ["_sort_date", "_sort_result", "현장명"]
             ).reset_index(drop=True)
-            # 같은 청구건이 기간 안에서 2번 이상(재지연 등) 나오면, 첫 등장 이후는 '중복'으로 표시
-            rep_df["_dup"] = rep_df.duplicated(subset=["_claim_id"], keep="first")
+            # 같은 청구건이 기간 안에서 2번 이상(재지연 등) 나오면, 가장 마지막(최신 상태) 행만 정상 표기하고
+            # 그 전에 나온(이미 지나간/바뀐) 행들을 회색 음영으로 표시한다.
+            rep_df["_dup"] = rep_df.duplicated(subset=["_claim_id"], keep="last")
 
             n_total = len(rep_df)
             n_paid = int((rep_df["결과"] == "입금완료").sum())
@@ -1420,15 +1421,20 @@ elif page == "지연현황 보고서":
             ])
 
             # ---- 합계는 반드시 청구건(claim) 단위로 중복 제거해서 산출 (같은 건이 기간 내 여러 줄로 펼쳐져도 두 번 세면 안 됨) ----
+            # "미수금액"은 O열(잔액)이 아니라 K열, 즉 애초에 받기로 한 금액 그대로를 뜻한다.
+            # 입금완료됐다고 0으로 바뀌지 않고, 그 금액이 그대로 "입금 합계"로 잡힌다.
             unique_df = rep_df.drop_duplicates(subset=["_claim_id"], keep="last")
-            total_unpaid = unique_df["미수잔액"].sum()
-            wait_total = unique_df.loc[unique_df["결과"] == "입금대기", "미수잔액"].sum()
+            total_claim_amt = unique_df["미수잔액"].sum()
+            paid_total = unique_df.loc[unique_df["결과"] == "입금완료", "미수잔액"].sum()
             delay_total = unique_df.loc[unique_df["결과"] == "지연", "미수잔액"].sum()
+            wait_total = unique_df.loc[unique_df["결과"] == "입금대기", "미수잔액"].sum()
             unconfirmed_total = unique_df.loc[unique_df["결과"] == "확인필요", "미수잔액"].sum()
 
             cols_report = ["입금예정일", "현장명", "업체명", "채권종류", "미수잔액",
                            "담당자", "최초예정일", "지연횟수", "총지연일수", "결과"]
             HEADER_LABEL = {"미수잔액": "미수금액", "총지연일수": "지연일수", "결과": "입금결과"}
+            n_before_money = cols_report.index("미수잔액")
+            n_after_money = len(cols_report) - n_before_money - 1
 
             # ---- 커스텀 테이블: 중복(같은 건 재등장) 행은 회색 음영으로 표시 ----
             money_cols = {"미수잔액"}
@@ -1461,36 +1467,29 @@ elif page == "지연현황 보고서":
                     html += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
                              f"<div style='padding:5px 10px;text-align:{align};white-space:nowrap;'>{val_disp}</div></td>")
                 html += "</tr>"
-            # 맨 아래 합계행 (건수 + 총 미수잔액, 중복 제거된 값)
-            html += "<tr style='font-weight:700;background:#fafafa;'>"
-            for col in cols_report:
-                if col == "입금예정일":
-                    v = f"총 {len(rep_df)}건 (중복제거 {len(unique_df)}건)"
-                    align = "left"
-                elif col == "미수잔액":
-                    v = f"{int(total_unpaid):,}"
-                    align = "right"
-                else:
-                    v = ""
-                    align = "center"
-                html += f"<td style='padding:0;border-bottom:1px solid #eee;'><div style='padding:5px 10px;text-align:{align};white-space:nowrap;'>{v}</div></td>"
-            html += "</tr>"
+            # ---- 합계 행들: 별도 박스가 아니라 표 맨 아래에 이어서, "미수금액" 칸 밑에 정확히 표기 ----
+            def _total_row(label, amount, bold, bg):
+                weight = "font-weight:700;" if bold else "font-weight:400;"
+                row = f"<tr style='{weight}background:{bg};'>"
+                row += (f"<td colspan='{n_before_money}' style='padding:0;border-bottom:1px solid #eee;'>"
+                        f"<div style='padding:5px 10px;text-align:left;'>{label}</div></td>")
+                row += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
+                        f"<div style='padding:5px 10px;text-align:right;'>{fmt_money(amount)}</div></td>")
+                row += (f"<td colspan='{n_after_money}' style='padding:0;border-bottom:1px solid #eee;'>"
+                        f"<div style='padding:5px 10px;'></div></td>")
+                row += "</tr>"
+                return row
+
+            html += _total_row(f"총 미수금액 (받기로 한 돈 전체, 청구건 {len(unique_df)}건 / 행 {len(rep_df)}건 기준)",
+                                total_claim_amt, True, "#fafafa")
+            html += _total_row("└ 입금완료 합계 (실제 들어온 돈)", paid_total, False, "#F4F9F4")
+            html += _total_row("└ 지연 합계 (아직 안 들어온 돈, 예정일 지남)", delay_total, False, "#FCEBEB")
+            html += _total_row("└ 입금대기 합계 (아직 예정일 전)", wait_total, False, "#F1EFE8")
+            if unconfirmed_total:
+                html += _total_row("└ 확인필요 합계", unconfirmed_total, False, "#FAEEDA")
             html += "</tbody></table></div>"
             st.markdown(html, unsafe_allow_html=True)
-            st.caption("회색으로 표시된 행은 같은 청구건이 기간 내에 재지연 등으로 두 번째 이상 등장한 줄입니다 (합계에는 한 번만 반영됨).")
-
-            summary_lines = [
-                f"<b>총 미수금액</b> &nbsp; {fmt_money(total_unpaid)}원",
-                f"<b>입금대기 합계</b> &nbsp; {fmt_money(wait_total)}원",
-                f"<b>지연 합계</b> &nbsp; {fmt_money(delay_total)}원",
-            ]
-            if unconfirmed_total:
-                summary_lines.append(f"<b>확인필요 합계</b> &nbsp; {fmt_money(unconfirmed_total)}원")
-            st.markdown(
-                "<div style='background:#F1EFE8;border-radius:12px;padding:14px 20px;margin:14px 0 18px 0;font-size:14px;line-height:2;'>"
-                + "<br>".join(summary_lines) + "</div>",
-                unsafe_allow_html=True,
-            )
+            st.caption("회색 음영 행은 같은 청구건이 기간 내에서 이미 지나간(바뀐) 예정일입니다 — 가장 마지막(최신) 줄만 정상 표기되며, 합계는 청구건당 한 번만 반영됩니다.")
 
             show = rep_df[cols_report].rename(columns=HEADER_LABEL).copy()
             btn_col1, btn_col2 = st.columns([1, 1])
