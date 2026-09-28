@@ -1490,11 +1490,11 @@ elif page == "지연현황 보고서":
 
             html += _total_row(f"총 미수금액 (받기로 한 돈 전체, 청구건 {len(unique_df)}건 / 행 {len(rep_df)}건 기준)",
                                 total_claim_amt, True, "#fafafa")
-            html += _total_row("└ 입금완료 합계 (실제 들어온 돈)", paid_total, False, "#F4F9F4")
-            html += _total_row("└ 지연 합계 (아직 안 들어온 돈, 예정일 지남)", delay_total, False, "#FCEBEB")
-            html += _total_row("└ 입금대기 합계 (아직 예정일 전)", wait_total, False, "#F1EFE8")
+            html += _total_row("└ 입금완료 합계 (실제 들어온 돈)", paid_total, True, "#F4F9F4")
+            html += _total_row("└ 지연 합계 (아직 안 들어온 돈, 예정일 지남)", delay_total, True, "#FCEBEB")
+            html += _total_row("└ 입금대기 합계 (아직 예정일 전)", wait_total, True, "#F1EFE8")
             if unconfirmed_total:
-                html += _total_row("└ 확인필요 합계", unconfirmed_total, False, "#FAEEDA")
+                html += _total_row("└ 확인필요 합계", unconfirmed_total, True, "#FAEEDA")
             html += "</tbody></table></div>"
             st.markdown(html, unsafe_allow_html=True)
             st.caption("회색 음영 행은 같은 청구건이 기간 내에서 이미 지나간(바뀐) 예정일입니다 — 가장 마지막(최신) 줄만 정상 표기되며, 합계는 청구건당 한 번만 반영됩니다.")
