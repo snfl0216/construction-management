@@ -452,10 +452,10 @@ if st.session_state.get("_delay_check_done_for") != _today_str:
 
 is_admin = st.session_state.get("is_admin", False)
 
-PAGES = ["현장별 미수현황", "기성청구현황", "입금 캘린더", "리스크 현장", "계약현황", "지연현황 보고서", "관리자"]
+PAGES = ["현장별 미수현황", "기성청구현황", "입금예상내역", "입금 캘린더", "리스크 현장", "계약현황", "지연현황 보고서", "관리자"]
 PAGE_ICONS = {
     "현장별 미수현황": "📋", "기성청구현황": "📊", "입금 캘린더": "📅",
-    "리스크 현장": "🚨", "계약현황": "📈", "지연현황 보고서": "📑", "관리자": "🔐",
+    "리스크 현장": "🚨", "계약현황": "📈", "지연현황 보고서": "📑", "입금예상내역": "🔮", "관리자": "🔐",
 }
 if "current_page" not in st.session_state:
     st.session_state.current_page = PAGES[0]
@@ -1505,6 +1505,222 @@ elif page == "지연현황 보고서":
                 st.download_button(
                     "📥 CSV 다운로드", show.to_csv(index=False).encode("utf-8-sig"),
                     file_name=f"지연현황보고서_{period_start}_{period_end}.csv", mime="text/csv"
+                )
+            with btn_col2:
+                components.html(
+                    """
+                    <button onclick="window.parent.print()"
+                        style="background:#185FA5;color:white;border:none;padding:8px 18px;
+                        border-radius:8px;font-size:14px;cursor:pointer;">🖨️ 인쇄 / PDF 저장</button>
+                    """,
+                    height=48,
+                )
+            st.caption("인쇄 버튼을 누르면 브라우저 인쇄창이 열립니다. '대상'을 'PDF로 저장'으로 바꾸면 PDF 파일로 저장할 수 있습니다.")
+
+
+# ==========================================================================
+# TAB: 입금예상내역 — 지연현황 보고서와 표는 동일하지만, 청구건당 딱 한 줄만
+# (지연되며 바뀐 예정일 이력을 다 펼치지 않고, 가장 마지막/현재예정일 기준으로만 판단)
+# ==========================================================================
+elif page == "입금예상내역":
+    st.markdown("""
+    <style>
+    @media print {
+        [data-testid="stSidebar"], [data-testid="stHeader"], [data-testid="stToolbar"],
+        #MainMenu, footer, .stRadio, .stSelectbox, .stDateInput, .stButton, .stDownloadButton,
+        .stNumberInput, .stDivider, hr {
+            display: none !important;
+        }
+        [data-testid="stAppViewContainer"] { margin-left: 0 !important; }
+        .print-title { display: block !important; }
+    }
+    .print-title { display: none; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.subheader("🔮 입금예상내역")
+    st.caption("지정한 기간에 현재 예정일(가장 최근 예정일)이 있는 건을 청구건당 한 줄씩만 보여줍니다. 지연되며 바뀐 과거 예정일은 펼치지 않습니다.")
+
+    period_mode2 = st.radio("기간 구분", ["주간", "월간"], horizontal=True, key="expect_period_mode")
+
+    today = date.today()
+    if period_mode2 == "주간":
+        base_day2 = st.date_input("주 선택 (아무 날짜나 고르면 그 주의 월~일로 계산합니다)", value=today, key="expect_base_day")
+        period_start2 = base_day2 - pd.Timedelta(days=base_day2.weekday())
+        period_start2 = date(period_start2.year, period_start2.month, period_start2.day)
+        period_end2 = period_start2 + pd.Timedelta(days=6)
+        period_end2 = date(period_end2.year, period_end2.month, period_end2.day)
+        period_label2 = f"{period_start2.strftime('%Y.%m.%d')} ~ {period_end2.strftime('%m.%d')} (월~일)"
+    else:
+        c1, c2 = st.columns(2)
+        year_sel2 = c1.number_input("연도", min_value=2000, max_value=2100, value=today.year, step=1, key="expect_year")
+        month_sel2 = c2.selectbox("월", list(range(1, 13)), index=today.month - 1, key="expect_month")
+        period_start2 = date(int(year_sel2), int(month_sel2), 1)
+        last_day2 = pycal.monthrange(int(year_sel2), int(month_sel2))[1]
+        period_end2 = date(int(year_sel2), int(month_sel2), last_day2)
+        period_label2 = f"{period_start2.strftime('%Y.%m.%d')} ~ {period_end2.strftime('%m.%d')} (1일~말일)"
+
+    st.markdown(f"<div class='print-title' style='font-size:20px;font-weight:700;margin-bottom:12px;'>입금예상내역 ({period_label2})</div>", unsafe_allow_html=True)
+    st.divider()
+
+    claims_df = load_table(engine, "claims")
+    payments_df = load_table(engine, "payments")
+    history_df = load_table(engine, "claim_delay_history")
+
+    if claims_df.empty:
+        st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '일일수금관리' 엑셀을 업로드해주세요.")
+    else:
+        empty_df = pd.DataFrame()
+        payments_by_claim = {cid: g for cid, g in payments_df.groupby("claim_id")} if not payments_df.empty else {}
+        history_auto = history_df[history_df["event_type"] == "자동지연"].copy() if not history_df.empty else empty_df
+        history_by_claim = {cid: g for cid, g in history_auto.groupby("claim_id")} if not history_auto.empty else {}
+
+        RESULT_ORDER2 = {"입금완료": 0, "지연": 1, "확인필요": 2, "입금대기": 3}
+        RESULT_BADGE2 = {
+            "지연": "<span style='background:#FCEBEB;color:#A32D2D;border-radius:999px;padding:2px 10px;font-size:12px;'>지연</span>",
+            "확인필요": "<span style='background:#FAEEDA;color:#854F0B;border-radius:999px;padding:2px 10px;font-size:12px;'>확인필요</span>",
+            "입금완료": "<span style='background:#E6F1FB;color:#185FA5;border-radius:999px;padding:2px 10px;font-size:12px;'>입금완료</span>",
+            "입금대기": "<span style='background:#F1EFE8;color:#5F5E5A;border-radius:999px;padding:2px 10px;font-size:12px;'>입금대기</span>",
+        }
+
+        expect_rows = []
+        for _, c in claims_df.iterrows():
+            cid = c["id"]
+            orig = safe_date(c["original_due_date"])
+            cur = safe_date(c["current_due_date"])
+            status = c["status"]
+            # 여기서는 지연되며 바뀐 과거 예정일들은 아예 안 보고, "지금 기준으로 예정된 마지막 날짜" 딱 하나만 본다
+            d = cur if cur is not None else orig
+            if d is None:
+                continue
+            if not (period_start2 <= d <= period_end2):
+                continue
+
+            hist_g = history_by_claim.get(cid, empty_df)
+            pay_rows = payments_by_claim.get(cid, empty_df)
+            paid_date = None
+            if not pay_rows.empty:
+                pd_dates = [safe_date(x) for x in pay_rows["payment_date"].tolist()]
+                pd_dates = [x for x in pd_dates if x is not None]
+                if pd_dates:
+                    paid_date = max(pd_dates)
+            delay_count = len(hist_g)
+            ref_date = (paid_date if status == "완납" and paid_date else today)
+            delay_days_total = calc_delay_days(c["original_due_date"], ref_date)
+
+            if status == "완납":
+                result = "입금완료"
+                pay_disp = (paid_date or d).isoformat()
+            elif status == "확인필요":
+                result = "확인필요"
+                pay_disp = "확인필요"
+            elif d < today:
+                result = "지연"
+                pay_disp = d.isoformat()
+            else:
+                result = "입금대기"
+                pay_disp = d.isoformat()
+
+            expect_rows.append({
+                "_claim_id": cid, "_sort_date": d, "_sort_result": RESULT_ORDER2[result],
+                "입금예정일": d.isoformat(), "결과": result,
+                "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
+                "담당자": c["manager"], "채권종류": c["claim_type"],
+                "미수잔액": (c["claim_amount"] or 0), "최초예정일": c["original_due_date"],
+                "입금(예정)일": pay_disp,
+                "지연횟수": delay_count, "총지연일수": delay_days_total,
+            })
+
+        if not expect_rows:
+            st.info(f"선택한 기간({period_label2})에 예정일이 있는 건이 없습니다.")
+        else:
+            exp_df = pd.DataFrame(expect_rows).sort_values(
+                ["_sort_date", "_sort_result", "현장명"]
+            ).reset_index(drop=True)
+            # 이 표는 청구건당 딱 한 줄만 만들기 때문에 원천적으로 중복이 없다
+            exp_df["_dup"] = False
+
+            n_total2 = len(exp_df)
+            n_paid2 = int((exp_df["결과"] == "입금완료").sum())
+            n_delay2 = int((exp_df["결과"] == "지연").sum())
+            n_wait2 = n_total2 - n_paid2 - n_delay2
+            render_metric_cards([
+                ("📑", "전체 건수", f"{n_total2}건"),
+                ("🔵", "입금완료", f"{n_paid2}건"),
+                ("🔴", "지연", f"{n_delay2}건"),
+                ("⚪", "대기/확인필요", f"{n_wait2}건"),
+            ])
+
+            total_claim_amt2 = exp_df["미수잔액"].sum()
+            paid_total2 = exp_df.loc[exp_df["결과"] == "입금완료", "미수잔액"].sum()
+            delay_total2 = exp_df.loc[exp_df["결과"] == "지연", "미수잔액"].sum()
+            wait_total2 = exp_df.loc[exp_df["결과"] == "입금대기", "미수잔액"].sum()
+            unconfirmed_total2 = exp_df.loc[exp_df["결과"] == "확인필요", "미수잔액"].sum()
+
+            cols_expect = ["입금예정일", "현장명", "업체명", "채권종류", "미수잔액",
+                           "담당자", "최초예정일", "입금(예정)일", "지연횟수", "총지연일수", "결과"]
+            HEADER_LABEL2 = {"미수잔액": "미수금액", "총지연일수": "지연일수", "결과": "입금결과"}
+            n_before_money2 = cols_expect.index("미수잔액")
+            n_after_money2 = len(cols_expect) - n_before_money2 - 1
+
+            money_cols2 = {"미수잔액"}
+            html2 = ("<div style='overflow-x:auto;'><table style='width:100%;border-collapse:collapse;font-size:13px;'>"
+                     "<thead><tr>")
+            for col in cols_expect:
+                html2 += (f"<th style='padding:0;border-bottom:2px solid #ddd;background:#fafafa;'>"
+                          f"<div style='padding:6px 6px;text-align:center;'>{HEADER_LABEL2.get(col, col)}</div></th>")
+            html2 += "</tr></thead><tbody>"
+            for _, row in exp_df.iterrows():
+                html2 += "<tr>"
+                for col in cols_expect:
+                    val = row[col]
+                    if col == "결과":
+                        val_disp = RESULT_BADGE2.get(val, val)
+                        align = "center"
+                    elif col in money_cols2:
+                        try:
+                            val_disp = f"{int(val):,}"
+                        except (TypeError, ValueError):
+                            val_disp = str(val)
+                        align = "right"
+                    elif col == "현장명":
+                        val_disp = "" if pd.isna(val) else str(val)
+                        align = "left"
+                    else:
+                        val_disp = "" if pd.isna(val) else str(val)
+                        align = "center"
+                    html2 += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
+                              f"<div style='padding:5px 10px;text-align:{align};white-space:nowrap;'>{val_disp}</div></td>")
+                html2 += "</tr>"
+
+            def _total_row2(label, amount, bold, bg):
+                weight = "font-weight:700;" if bold else "font-weight:400;"
+                row = f"<tr style='{weight}background:{bg};'>"
+                row += (f"<td colspan='{n_before_money2}' style='padding:0;border-bottom:1px solid #eee;'>"
+                        f"<div style='padding:5px 10px;text-align:left;'>{label}</div></td>")
+                row += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
+                        f"<div style='padding:5px 10px;text-align:right;'>{fmt_money(amount)}</div></td>")
+                row += (f"<td colspan='{n_after_money2}' style='padding:0;border-bottom:1px solid #eee;'>"
+                        f"<div style='padding:5px 10px;'></div></td>")
+                row += "</tr>"
+                return row
+
+            html2 += _total_row2(f"총 미수금액 (받기로 한 돈 전체, 청구건 {len(exp_df)}건 기준)", total_claim_amt2, True, "#fafafa")
+            html2 += _total_row2("└ 입금완료 합계 (실제 들어온 돈)", paid_total2, True, "#F4F9F4")
+            html2 += _total_row2("└ 지연 합계 (아직 안 들어온 돈, 예정일 지남)", delay_total2, True, "#FCEBEB")
+            html2 += _total_row2("└ 입금대기 합계 (아직 예정일 전)", wait_total2, True, "#F1EFE8")
+            if unconfirmed_total2:
+                html2 += _total_row2("└ 확인필요 합계", unconfirmed_total2, True, "#FAEEDA")
+            html2 += "</tbody></table></div>"
+            st.markdown(html2, unsafe_allow_html=True)
+            st.caption("이 표는 청구건당 한 줄만 표시됩니다 (지연현황 보고서와 달리, 과거에 지나간 예정일은 펼치지 않고 현재예정일 기준 하나만 봅니다).")
+
+            show2 = exp_df[cols_expect].rename(columns=HEADER_LABEL2).copy()
+            btn_col1, btn_col2 = st.columns([1, 1])
+            with btn_col1:
+                st.download_button(
+                    "📥 CSV 다운로드", show2.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"입금예상내역_{period_start2}_{period_end2}.csv", mime="text/csv"
                 )
             with btn_col2:
                 components.html(
