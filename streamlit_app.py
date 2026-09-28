@@ -1307,7 +1307,7 @@ elif page == "지연현황 보고서":
             history_auto = history_auto.sort_values("id")
         history_by_claim = {cid: g for cid, g in history_auto.groupby("claim_id")} if not history_auto.empty else {}
 
-        RESULT_ORDER = {"지연": 0, "확인필요": 1, "입금완료": 2, "입금대기": 3}
+        RESULT_ORDER = {"입금완료": 0, "지연": 1, "확인필요": 2, "입금대기": 3}
         RESULT_BADGE = {
             "지연": "<span style='background:#FCEBEB;color:#A32D2D;border-radius:999px;padding:2px 10px;font-size:12px;'>지연</span>",
             "확인필요": "<span style='background:#FAEEDA;color:#854F0B;border-radius:999px;padding:2px 10px;font-size:12px;'>확인필요</span>",
@@ -1390,12 +1390,20 @@ elif page == "지연현황 보고서":
                 if not (period_start <= d <= period_end):
                     continue
 
+                if result == "입금완료":
+                    pay_disp = (paid_date or d).isoformat()
+                elif result == "확인필요":
+                    pay_disp = "확인필요"
+                else:
+                    pay_disp = next_date.isoformat() if next_date else d.isoformat()
+
                 report_rows.append({
                     "_claim_id": cid, "_sort_date": d, "_sort_result": RESULT_ORDER[result],
                     "입금예정일": d.isoformat(), "결과": result,
                     "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
                     "담당자": c["manager"], "채권종류": c["claim_type"],
                     "미수잔액": (c["claim_amount"] or 0), "최초예정일": c["original_due_date"],
+                    "입금(예정)일": pay_disp,
                     "지연횟수": delay_count, "총지연일수": delay_days_total,
                 })
 
@@ -1431,7 +1439,7 @@ elif page == "지연현황 보고서":
             unconfirmed_total = unique_df.loc[unique_df["결과"] == "확인필요", "미수잔액"].sum()
 
             cols_report = ["입금예정일", "현장명", "업체명", "채권종류", "미수잔액",
-                           "담당자", "최초예정일", "지연횟수", "총지연일수", "결과"]
+                           "담당자", "최초예정일", "입금(예정)일", "지연횟수", "총지연일수", "결과"]
             HEADER_LABEL = {"미수잔액": "미수금액", "총지연일수": "지연일수", "결과": "입금결과"}
             n_before_money = cols_report.index("미수잔액")
             n_after_money = len(cols_report) - n_before_money - 1
