@@ -1390,20 +1390,12 @@ elif page == "지연현황 보고서":
                 if not (period_start <= d <= period_end):
                     continue
 
-                if result == "입금완료":
-                    pay_disp = (paid_date or d).isoformat()
-                elif result == "확인필요":
-                    pay_disp = "확인필요"
-                else:
-                    pay_disp = next_date.isoformat() if next_date else d.isoformat()
-
                 report_rows.append({
                     "_claim_id": cid, "_sort_date": d, "_sort_result": RESULT_ORDER[result],
                     "입금예정일": d.isoformat(), "결과": result,
                     "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
                     "담당자": c["manager"], "채권종류": c["claim_type"],
                     "미수잔액": unpaid, "최초예정일": c["original_due_date"],
-                    "입금(예정)일": pay_disp,
                     "지연횟수": delay_count, "총지연일수": delay_days_total,
                 })
 
@@ -1434,21 +1426,9 @@ elif page == "지연현황 보고서":
             delay_total = unique_df.loc[unique_df["결과"] == "지연", "미수잔액"].sum()
             unconfirmed_total = unique_df.loc[unique_df["결과"] == "확인필요", "미수잔액"].sum()
 
-            summary_lines = [
-                f"<b>총 미수금액</b> &nbsp; {fmt_money(total_unpaid)}원",
-                f"<b>입금대기 합계</b> &nbsp; {fmt_money(wait_total)}원",
-                f"<b>지연 합계</b> &nbsp; {fmt_money(delay_total)}원",
-            ]
-            if unconfirmed_total:
-                summary_lines.append(f"<b>확인필요 합계</b> &nbsp; {fmt_money(unconfirmed_total)}원")
-            st.markdown(
-                "<div style='background:#F1EFE8;border-radius:12px;padding:14px 20px;margin:6px 0 18px 0;font-size:14px;line-height:2;'>"
-                + "<br>".join(summary_lines) + "</div>",
-                unsafe_allow_html=True,
-            )
-
-            cols_report = ["입금예정일", "결과", "현장명", "업체명", "담당자", "채권종류",
-                           "미수잔액", "최초예정일", "입금(예정)일", "지연횟수", "총지연일수"]
+            cols_report = ["입금예정일", "현장명", "업체명", "채권종류", "미수잔액",
+                           "담당자", "최초예정일", "지연횟수", "총지연일수", "결과"]
+            HEADER_LABEL = {"미수잔액": "미수금액", "총지연일수": "지연일수", "결과": "입금결과"}
 
             # ---- 커스텀 테이블: 중복(같은 건 재등장) 행은 회색 음영으로 표시 ----
             money_cols = {"미수잔액"}
@@ -1456,7 +1436,7 @@ elif page == "지연현황 보고서":
                     "<thead><tr>")
             for col in cols_report:
                 html += (f"<th style='padding:0;border-bottom:2px solid #ddd;background:#fafafa;'>"
-                         f"<div style='padding:6px 6px;text-align:center;'>{col}</div></th>")
+                         f"<div style='padding:6px 6px;text-align:center;'>{HEADER_LABEL.get(col, col)}</div></th>")
             html += "</tr></thead><tbody>"
             for _, row in rep_df.iterrows():
                 row_bg = "background:#F0F0EC;color:#8A8A85;" if row["_dup"] else ""
@@ -1499,7 +1479,20 @@ elif page == "지연현황 보고서":
             st.markdown(html, unsafe_allow_html=True)
             st.caption("회색으로 표시된 행은 같은 청구건이 기간 내에 재지연 등으로 두 번째 이상 등장한 줄입니다 (합계에는 한 번만 반영됨).")
 
-            show = rep_df[cols_report].copy()
+            summary_lines = [
+                f"<b>총 미수금액</b> &nbsp; {fmt_money(total_unpaid)}원",
+                f"<b>입금대기 합계</b> &nbsp; {fmt_money(wait_total)}원",
+                f"<b>지연 합계</b> &nbsp; {fmt_money(delay_total)}원",
+            ]
+            if unconfirmed_total:
+                summary_lines.append(f"<b>확인필요 합계</b> &nbsp; {fmt_money(unconfirmed_total)}원")
+            st.markdown(
+                "<div style='background:#F1EFE8;border-radius:12px;padding:14px 20px;margin:14px 0 18px 0;font-size:14px;line-height:2;'>"
+                + "<br>".join(summary_lines) + "</div>",
+                unsafe_allow_html=True,
+            )
+
+            show = rep_df[cols_report].rename(columns=HEADER_LABEL).copy()
             btn_col1, btn_col2 = st.columns([1, 1])
             with btn_col1:
                 st.download_button(
