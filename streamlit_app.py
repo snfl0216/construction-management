@@ -5,6 +5,7 @@ import altair as alt
 from datetime import datetime, date
 import io
 import calendar as pycal
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="현장 미수관리 시스템", layout="wide")
 
@@ -451,10 +452,10 @@ if st.session_state.get("_delay_check_done_for") != _today_str:
 
 is_admin = st.session_state.get("is_admin", False)
 
-PAGES = ["현장별 미수현황", "기성청구현황", "입금 캘린더", "리스크 현장", "계약현황", "관리자"]
+PAGES = ["현장별 미수현황", "기성청구현황", "입금 캘린더", "리스크 현장", "계약현황", "지연현황 보고서", "관리자"]
 PAGE_ICONS = {
     "현장별 미수현황": "📋", "기성청구현황": "📊", "입금 캘린더": "📅",
-    "리스크 현장": "🚨", "계약현황": "📈", "관리자": "🔐",
+    "리스크 현장": "🚨", "계약현황": "📈", "지연현황 보고서": "📑", "관리자": "🔐",
 }
 if "current_page" not in st.session_state:
     st.session_state.current_page = PAGES[0]
@@ -1246,6 +1247,186 @@ elif page == "계약현황":
             )
             st.altair_chart(combined_chart, use_container_width=True)
 
+
+
+# ==========================================================================
+# TAB: 지연현황 보고서 — 주간/월간, 이력 그대로 펼쳐서(엑셀 방식) 보여주는 보고서
+# ==========================================================================
+elif page == "지연현황 보고서":
+    st.markdown("""
+    <style>
+    @media print {
+        [data-testid="stSidebar"], [data-testid="stHeader"], [data-testid="stToolbar"],
+        #MainMenu, footer, .stRadio, .stSelectbox, .stDateInput, .stButton, .stDownloadButton,
+        .stNumberInput, .stDivider, hr {
+            display: none !important;
+        }
+        [data-testid="stAppViewContainer"] { margin-left: 0 !important; }
+        .print-title { display: block !important; }
+    }
+    .print-title { display: none; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.subheader("📑 지연현황 보고서")
+    st.caption("일일수금관리 이력 기준으로, 지정한 기간에 예정일이 있었던 모든 건을 엑셀 이력처럼 한 줄씩 펼쳐서 보여줍니다 (완납/지연 전부 포함).")
+
+    period_mode = st.radio("기간 구분", ["주간", "월간"], horizontal=True)
+
+    today = date.today()
+    if period_mode == "주간":
+        base_day = st.date_input("주 선택 (아무 날짜나 고르면 그 주의 월~일로 계산합니다)", value=today)
+        period_start = base_day - pd.Timedelta(days=base_day.weekday())  # 월요일
+        period_start = date(period_start.year, period_start.month, period_start.day)
+        period_end = period_start + pd.Timedelta(days=6)
+        period_end = date(period_end.year, period_end.month, period_end.day)
+        period_label = f"{period_start.strftime('%Y.%m.%d')} ~ {period_end.strftime('%m.%d')} (월~일)"
+    else:
+        c1, c2 = st.columns(2)
+        year_sel = c1.number_input("연도", min_value=2000, max_value=2100, value=today.year, step=1)
+        month_sel = c2.selectbox("월", list(range(1, 13)), index=today.month - 1)
+        period_start = date(int(year_sel), int(month_sel), 1)
+        last_day = pycal.monthrange(int(year_sel), int(month_sel))[1]
+        period_end = date(int(year_sel), int(month_sel), last_day)
+        period_label = f"{period_start.strftime('%Y.%m.%d')} ~ {period_end.strftime('%m.%d')} (1일~말일)"
+
+    st.markdown(f"<div class='print-title' style='font-size:20px;font-weight:700;margin-bottom:12px;'>미수금 입금 및 지연 현황 ({period_label})</div>", unsafe_allow_html=True)
+    st.divider()
+
+    claims_df = load_table(engine, "claims")
+    payments_df = load_table(engine, "payments")
+    history_df = load_table(engine, "claim_delay_history")
+
+    if claims_df.empty:
+        st.info("데이터가 없습니다. '🔐 관리자' 탭에서 '일일수금관리' 엑셀을 업로드해주세요.")
+    else:
+        empty_df = pd.DataFrame()
+        payments_by_claim = {cid: g for cid, g in payments_df.groupby("claim_id")} if not payments_df.empty else {}
+        history_auto = history_df[history_df["event_type"] == "자동지연"].copy() if not history_df.empty else empty_df
+        if not history_auto.empty:
+            history_auto = history_auto.sort_values("id")
+        history_by_claim = {cid: g for cid, g in history_auto.groupby("claim_id")} if not history_auto.empty else {}
+
+        RESULT_ORDER = {"지연": 0, "확인필요": 1, "입금완료": 2, "입금대기": 3}
+        RESULT_BADGE = {
+            "지연": "<span style='background:#FCEBEB;color:#A32D2D;border-radius:999px;padding:2px 10px;font-size:12px;'>지연</span>",
+            "확인필요": "<span style='background:#FAEEDA;color:#854F0B;border-radius:999px;padding:2px 10px;font-size:12px;'>확인필요</span>",
+            "입금완료": "<span style='background:#E6F1FB;color:#185FA5;border-radius:999px;padding:2px 10px;font-size:12px;'>입금완료</span>",
+            "입금대기": "<span style='background:#F1EFE8;color:#5F5E5A;border-radius:999px;padding:2px 10px;font-size:12px;'>입금대기</span>",
+        }
+
+        report_rows = []
+        for _, c in claims_df.iterrows():
+            cid = c["id"]
+            orig = safe_date(c["original_due_date"])
+            cur = safe_date(c["current_due_date"])
+            status = c["status"]
+            hist_g = history_by_claim.get(cid, empty_df)
+
+            # 예정일 이력을 '레그(leg)' 단위로 재구성: 최초예정일 -> (지연되어 바뀐)새 예정일 -> ... -> 현재예정일
+            legs = [orig] if orig else []
+            if not hist_g.empty:
+                for _, hr in hist_g.iterrows():
+                    old_d = safe_date(hr["old_due_date"])
+                    new_d = safe_date(hr["new_due_date"])
+                    if new_d is not None and new_d != old_d:
+                        if not legs or legs[-1] != new_d:
+                            legs.append(new_d)
+            if cur is not None and (not legs or legs[-1] != cur):
+                legs.append(cur)
+            dedup = []
+            for d in legs:
+                if not dedup or dedup[-1] != d:
+                    dedup.append(d)
+            legs = dedup
+            if not legs:
+                continue
+
+            # 청구 단위 공통 값 (모든 펼쳐진 행에 동일하게 반복 표기)
+            pay_rows = payments_by_claim.get(cid, empty_df)
+            paid = pay_rows["payment_amount"].sum() if not pay_rows.empty else 0
+            unpaid = (c["claim_amount"] or 0) - paid
+            delay_count = len(hist_g)
+            if status == "완납":
+                ref_date = (safe_date(pay_rows.iloc[-1]["payment_date"]) if not pay_rows.empty else today) or today
+            else:
+                ref_date = today
+            delay_days_total = calc_delay_days(c["original_due_date"], ref_date)
+
+            n_legs = len(legs)
+            for i, d in enumerate(legs):
+                is_last = (i == n_legs - 1)
+                if not is_last:
+                    result = "지연"
+                elif status == "완납":
+                    result = "입금완료"
+                elif status == "확인필요":
+                    result = "확인필요"
+                elif d < today:
+                    result = "지연"
+                else:
+                    result = "입금대기"
+
+                if not (period_start <= d <= period_end):
+                    continue
+
+                report_rows.append({
+                    "_sort_date": d, "_sort_result": RESULT_ORDER[result],
+                    "해당예정일": d.isoformat(), "결과": result,
+                    "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
+                    "담당자": c["manager"], "채권종류": c["claim_type"],
+                    "최초예정일": c["original_due_date"],
+                    "현재예정일": c["current_due_date"] if pd.notna(c["current_due_date"]) else "확인필요",
+                    "지연횟수": delay_count, "총지연일수": delay_days_total, "미수잔액": unpaid,
+                })
+
+        if not report_rows:
+            st.info(f"선택한 기간({period_label})에 예정일이 있었던 건이 없습니다.")
+        else:
+            rep_df = pd.DataFrame(report_rows).sort_values(
+                ["_sort_date", "_sort_result", "현장명"]
+            ).reset_index(drop=True)
+
+            n_total = len(rep_df)
+            n_paid = int((rep_df["결과"] == "입금완료").sum())
+            n_delay = int((rep_df["결과"] == "지연").sum())
+            n_wait = n_total - n_paid - n_delay
+            render_metric_cards([
+                ("📑", "전체 건수", f"{n_total}건"),
+                ("🔵", "입금완료", f"{n_paid}건"),
+                ("🔴", "지연", f"{n_delay}건"),
+                ("⚪", "대기/확인필요", f"{n_wait}건"),
+            ])
+
+            cols_report = ["해당예정일", "결과", "현장명", "업체명", "담당자", "채권종류",
+                           "최초예정일", "현재예정일", "지연횟수", "총지연일수", "미수잔액"]
+            show = rep_df[cols_report].copy()
+
+            total_row = {c: "" for c in cols_report}
+            total_row["해당예정일"] = f"총 {len(show)}건"
+            total_row["미수잔액"] = show["미수잔액"].sum()
+            show_with_total = pd.concat([show, pd.DataFrame([total_row])], ignore_index=True)
+
+            show_display = show_with_total.copy()
+            show_display["결과"] = show_display["결과"].apply(lambda s: RESULT_BADGE.get(s, s) if s else "")
+            render_html_table(show_display, money_cols=["미수잔액"])
+
+            btn_col1, btn_col2 = st.columns([1, 1])
+            with btn_col1:
+                st.download_button(
+                    "📥 CSV 다운로드", show.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"지연현황보고서_{period_start}_{period_end}.csv", mime="text/csv"
+                )
+            with btn_col2:
+                components.html(
+                    """
+                    <button onclick="window.parent.print()"
+                        style="background:#185FA5;color:white;border:none;padding:8px 18px;
+                        border-radius:8px;font-size:14px;cursor:pointer;">🖨️ 인쇄 / PDF 저장</button>
+                    """,
+                    height=48,
+                )
+            st.caption("인쇄 버튼을 누르면 브라우저 인쇄창이 열립니다. '대상'을 'PDF로 저장'으로 바꾸면 PDF 파일로 저장할 수 있습니다.")
 
 
 # ==========================================================================
