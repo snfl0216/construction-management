@@ -1323,17 +1323,29 @@ elif page == "지연현황 보고서":
             status = c["status"]
             hist_g = history_by_claim.get(cid, empty_df)
 
-            # 예정일 이력을 '레그(leg)' 단위로 재구성: 최초예정일 -> (지연되어 바뀐)새 예정일 -> ... -> 현재예정일
-            legs = [orig] if orig else []
+            # 예정일 이력을 '레그(leg)' 단위로 재구성.
+            # ⚠️ 최초예정일(orig)은 화면 표시용 컬럼일 뿐, 실제 "그 시점에 예정돼있던 날짜(G열)"와
+            # 항상 일치하는 건 아니다(엑셀상 최초예정일 칼럼이 나중에 수정되거나, 조기입금 등으로
+            # 실제 이력과 어긋나는 경우가 있음). 그래서 레그는 반드시 실제 이력(claim_delay_history)
+            # 또는 현재예정일(cur)에서만 만든다 — orig를 임의로 첫 레그에 끼워 넣지 않는다.
             if not hist_g.empty:
+                legs = []
+                first_old = safe_date(hist_g.iloc[0]["old_due_date"])
+                if first_old is not None:
+                    legs.append(first_old)
                 for _, hr in hist_g.iterrows():
-                    old_d = safe_date(hr["old_due_date"])
                     new_d = safe_date(hr["new_due_date"])
-                    if new_d is not None and new_d != old_d:
-                        if not legs or legs[-1] != new_d:
-                            legs.append(new_d)
-            if cur is not None and (not legs or legs[-1] != cur):
-                legs.append(cur)
+                    if new_d is not None and (not legs or legs[-1] != new_d):
+                        legs.append(new_d)
+                if cur is not None and (not legs or legs[-1] != cur):
+                    legs.append(cur)
+            else:
+                if cur is not None:
+                    legs = [cur]
+                elif orig is not None:
+                    legs = [orig]
+                else:
+                    legs = []
             dedup = []
             for d in legs:
                 if not dedup or dedup[-1] != d:
@@ -1347,10 +1359,13 @@ elif page == "지연현황 보고서":
             paid = pay_rows["payment_amount"].sum() if not pay_rows.empty else 0
             unpaid = (c["claim_amount"] or 0) - paid
             delay_count = len(hist_g)
-            if status == "완납":
-                ref_date = (safe_date(pay_rows.iloc[-1]["payment_date"]) if not pay_rows.empty else today) or today
-            else:
-                ref_date = today
+            paid_date = None
+            if not pay_rows.empty:
+                pd_dates = [safe_date(x) for x in pay_rows["payment_date"].tolist()]
+                pd_dates = [x for x in pd_dates if x is not None]
+                if pd_dates:
+                    paid_date = max(pd_dates)
+            ref_date = (paid_date if status == "완납" and paid_date else today)
             delay_days_total = calc_delay_days(c["original_due_date"], ref_date)
 
             n_legs = len(legs)
@@ -1358,26 +1373,38 @@ elif page == "지연현황 보고서":
                 is_last = (i == n_legs - 1)
                 if not is_last:
                     result = "지연"
+                    next_date = legs[i + 1]
                 elif status == "완납":
                     result = "입금완료"
+                    next_date = None
                 elif status == "확인필요":
                     result = "확인필요"
+                    next_date = None
                 elif d < today:
                     result = "지연"
+                    next_date = d
                 else:
                     result = "입금대기"
+                    next_date = d
 
                 if not (period_start <= d <= period_end):
                     continue
 
+                if result == "입금완료":
+                    pay_disp = (paid_date or d).isoformat()
+                elif result == "확인필요":
+                    pay_disp = "확인필요"
+                else:
+                    pay_disp = next_date.isoformat() if next_date else d.isoformat()
+
                 report_rows.append({
-                    "_sort_date": d, "_sort_result": RESULT_ORDER[result],
-                    "해당예정일": d.isoformat(), "결과": result,
+                    "_claim_id": cid, "_sort_date": d, "_sort_result": RESULT_ORDER[result],
+                    "입금예정일": d.isoformat(), "결과": result,
                     "현장명": c["site_name"], "업체명": c["company_name"] if pd.notna(c["company_name"]) else "-",
                     "담당자": c["manager"], "채권종류": c["claim_type"],
-                    "최초예정일": c["original_due_date"],
-                    "현재예정일": c["current_due_date"] if pd.notna(c["current_due_date"]) else "확인필요",
-                    "지연횟수": delay_count, "총지연일수": delay_days_total, "미수잔액": unpaid,
+                    "미수잔액": unpaid, "최초예정일": c["original_due_date"],
+                    "입금(예정)일": pay_disp,
+                    "지연횟수": delay_count, "총지연일수": delay_days_total,
                 })
 
         if not report_rows:
@@ -1386,6 +1413,8 @@ elif page == "지연현황 보고서":
             rep_df = pd.DataFrame(report_rows).sort_values(
                 ["_sort_date", "_sort_result", "현장명"]
             ).reset_index(drop=True)
+            # 같은 청구건이 기간 안에서 2번 이상(재지연 등) 나오면, 첫 등장 이후는 '중복'으로 표시
+            rep_df["_dup"] = rep_df.duplicated(subset=["_claim_id"], keep="first")
 
             n_total = len(rep_df)
             n_paid = int((rep_df["결과"] == "입금완료").sum())
@@ -1398,19 +1427,79 @@ elif page == "지연현황 보고서":
                 ("⚪", "대기/확인필요", f"{n_wait}건"),
             ])
 
-            cols_report = ["해당예정일", "결과", "현장명", "업체명", "담당자", "채권종류",
-                           "최초예정일", "현재예정일", "지연횟수", "총지연일수", "미수잔액"]
+            # ---- 합계는 반드시 청구건(claim) 단위로 중복 제거해서 산출 (같은 건이 기간 내 여러 줄로 펼쳐져도 두 번 세면 안 됨) ----
+            unique_df = rep_df.drop_duplicates(subset=["_claim_id"], keep="last")
+            total_unpaid = unique_df["미수잔액"].sum()
+            wait_total = unique_df.loc[unique_df["결과"] == "입금대기", "미수잔액"].sum()
+            delay_total = unique_df.loc[unique_df["결과"] == "지연", "미수잔액"].sum()
+            unconfirmed_total = unique_df.loc[unique_df["결과"] == "확인필요", "미수잔액"].sum()
+
+            summary_lines = [
+                f"<b>총 미수금액</b> &nbsp; {fmt_money(total_unpaid)}원",
+                f"<b>입금대기 합계</b> &nbsp; {fmt_money(wait_total)}원",
+                f"<b>지연 합계</b> &nbsp; {fmt_money(delay_total)}원",
+            ]
+            if unconfirmed_total:
+                summary_lines.append(f"<b>확인필요 합계</b> &nbsp; {fmt_money(unconfirmed_total)}원")
+            st.markdown(
+                "<div style='background:#F1EFE8;border-radius:12px;padding:14px 20px;margin:6px 0 18px 0;font-size:14px;line-height:2;'>"
+                + "<br>".join(summary_lines) + "</div>",
+                unsafe_allow_html=True,
+            )
+
+            cols_report = ["입금예정일", "결과", "현장명", "업체명", "담당자", "채권종류",
+                           "미수잔액", "최초예정일", "입금(예정)일", "지연횟수", "총지연일수"]
+
+            # ---- 커스텀 테이블: 중복(같은 건 재등장) 행은 회색 음영으로 표시 ----
+            money_cols = {"미수잔액"}
+            html = ("<div style='overflow-x:auto;'><table style='width:100%;border-collapse:collapse;font-size:13px;'>"
+                    "<thead><tr>")
+            for col in cols_report:
+                html += (f"<th style='padding:0;border-bottom:2px solid #ddd;background:#fafafa;'>"
+                         f"<div style='padding:6px 6px;text-align:center;'>{col}</div></th>")
+            html += "</tr></thead><tbody>"
+            for _, row in rep_df.iterrows():
+                row_bg = "background:#F0F0EC;color:#8A8A85;" if row["_dup"] else ""
+                html += f"<tr style='{row_bg}'>"
+                for col in cols_report:
+                    val = row[col]
+                    if col == "결과":
+                        val_disp = RESULT_BADGE.get(val, val)
+                        align = "center"
+                    elif col in money_cols:
+                        try:
+                            val_disp = f"{int(val):,}"
+                        except (TypeError, ValueError):
+                            val_disp = str(val)
+                        align = "right"
+                    elif col == "현장명":
+                        val_disp = "" if pd.isna(val) else str(val)
+                        align = "left"
+                    else:
+                        val_disp = "" if pd.isna(val) else str(val)
+                        align = "center"
+                    html += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
+                             f"<div style='padding:5px 10px;text-align:{align};white-space:nowrap;'>{val_disp}</div></td>")
+                html += "</tr>"
+            # 맨 아래 합계행 (건수 + 총 미수잔액, 중복 제거된 값)
+            html += "<tr style='font-weight:700;background:#fafafa;'>"
+            for col in cols_report:
+                if col == "입금예정일":
+                    v = f"총 {len(rep_df)}건 (중복제거 {len(unique_df)}건)"
+                    align = "left"
+                elif col == "미수잔액":
+                    v = f"{int(total_unpaid):,}"
+                    align = "right"
+                else:
+                    v = ""
+                    align = "center"
+                html += f"<td style='padding:0;border-bottom:1px solid #eee;'><div style='padding:5px 10px;text-align:{align};white-space:nowrap;'>{v}</div></td>"
+            html += "</tr>"
+            html += "</tbody></table></div>"
+            st.markdown(html, unsafe_allow_html=True)
+            st.caption("회색으로 표시된 행은 같은 청구건이 기간 내에 재지연 등으로 두 번째 이상 등장한 줄입니다 (합계에는 한 번만 반영됨).")
+
             show = rep_df[cols_report].copy()
-
-            total_row = {c: "" for c in cols_report}
-            total_row["해당예정일"] = f"총 {len(show)}건"
-            total_row["미수잔액"] = show["미수잔액"].sum()
-            show_with_total = pd.concat([show, pd.DataFrame([total_row])], ignore_index=True)
-
-            show_display = show_with_total.copy()
-            show_display["결과"] = show_display["결과"].apply(lambda s: RESULT_BADGE.get(s, s) if s else "")
-            render_html_table(show_display, money_cols=["미수잔액"])
-
             btn_col1, btn_col2 = st.columns([1, 1])
             with btn_col1:
                 st.download_button(
