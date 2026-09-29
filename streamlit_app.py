@@ -455,7 +455,7 @@ is_admin = st.session_state.get("is_admin", False)
 PAGES = ["현장별 미수현황", "기성청구현황", "입금예상내역", "입금 캘린더", "리스크 현장", "계약현황", "지연현황 보고서", "관리자"]
 PAGE_ICONS = {
     "현장별 미수현황": "📋", "기성청구현황": "📊", "입금 캘린더": "📅",
-    "리스크 현장": "🚨", "계약현황": "📈", "지연현황 보고서": "📑", "입금예상내역": "🔮", "관리자": "🔐",
+    "리스크 현장": "🚨", "계약현황": "📈", "지연현황 보고서": "📑", "입금예상내역": "💰", "관리자": "🔐",
 }
 if "current_page" not in st.session_state:
     st.session_state.current_page = PAGES[0]
@@ -1538,7 +1538,7 @@ elif page == "입금예상내역":
     </style>
     """, unsafe_allow_html=True)
 
-    st.subheader("🔮 입금예상내역")
+    st.subheader("💰 입금예상내역")
     st.caption("지정한 기간에 현재 예정일(가장 최근 예정일)이 있는 건을 청구건당 한 줄씩만 보여줍니다. 지연되며 바뀐 과거 예정일은 펼치지 않습니다.")
 
     period_mode2 = st.radio("기간 구분", ["주간", "월간"], horizontal=True, key="expect_period_mode")
@@ -1590,6 +1590,8 @@ elif page == "입금예상내역":
             cur = safe_date(c["current_due_date"])
             status = c["status"]
             # 여기서는 지연되며 바뀐 과거 예정일들은 아예 안 보고, "지금 기준으로 예정된 마지막 날짜" 딱 하나만 본다
+            if status == "완납":
+                continue  # 이미 입금완료된 건은 '예상' 대상이 아니므로 아예 제외
             d = cur if cur is not None else orig
             if d is None:
                 continue
@@ -1605,13 +1607,10 @@ elif page == "입금예상내역":
                 if pd_dates:
                     paid_date = max(pd_dates)
             delay_count = len(hist_g)
-            ref_date = (paid_date if status == "완납" and paid_date else today)
+            ref_date = today
             delay_days_total = calc_delay_days(c["original_due_date"], ref_date)
 
-            if status == "완납":
-                result = "입금완료"
-                pay_disp = (paid_date or d).isoformat()
-            elif status == "확인필요":
+            if status == "확인필요":
                 result = "확인필요"
                 pay_disp = "확인필요"
             elif d < today:
@@ -1641,18 +1640,17 @@ elif page == "입금예상내역":
             exp_df["_dup"] = False
 
             n_total2 = len(exp_df)
-            n_paid2 = int((exp_df["결과"] == "입금완료").sum())
             n_delay2 = int((exp_df["결과"] == "지연").sum())
-            n_wait2 = n_total2 - n_paid2 - n_delay2
+            n_confirm2 = int((exp_df["결과"] == "확인필요").sum())
+            n_wait2 = n_total2 - n_delay2 - n_confirm2
             render_metric_cards([
                 ("📑", "전체 건수", f"{n_total2}건"),
-                ("🔵", "입금완료", f"{n_paid2}건"),
                 ("🔴", "지연", f"{n_delay2}건"),
-                ("⚪", "대기/확인필요", f"{n_wait2}건"),
+                ("⚪", "입금대기", f"{n_wait2}건"),
+                ("🟡", "확인필요", f"{n_confirm2}건"),
             ])
 
             total_claim_amt2 = exp_df["미수잔액"].sum()
-            paid_total2 = exp_df.loc[exp_df["결과"] == "입금완료", "미수잔액"].sum()
             delay_total2 = exp_df.loc[exp_df["결과"] == "지연", "미수잔액"].sum()
             wait_total2 = exp_df.loc[exp_df["결과"] == "입금대기", "미수잔액"].sum()
             unconfirmed_total2 = exp_df.loc[exp_df["결과"] == "확인필요", "미수잔액"].sum()
@@ -1705,8 +1703,7 @@ elif page == "입금예상내역":
                 row += "</tr>"
                 return row
 
-            html2 += _total_row2(f"총 미수금액 (받기로 한 돈 전체, 청구건 {len(exp_df)}건 기준)", total_claim_amt2, True, "#fafafa")
-            html2 += _total_row2("└ 입금완료 합계 (실제 들어온 돈)", paid_total2, True, "#F4F9F4")
+            html2 += _total_row2(f"총 미수금액 (아직 입금 안 된 돈 전체, 청구건 {len(exp_df)}건 기준)", total_claim_amt2, True, "#fafafa")
             html2 += _total_row2("└ 지연 합계 (아직 안 들어온 돈, 예정일 지남)", delay_total2, True, "#FCEBEB")
             html2 += _total_row2("└ 입금대기 합계 (아직 예정일 전)", wait_total2, True, "#F1EFE8")
             if unconfirmed_total2:
