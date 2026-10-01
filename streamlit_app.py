@@ -1476,7 +1476,7 @@ elif page == "지연현황 보고서":
                              f"<div style='padding:5px 10px;text-align:{align};white-space:nowrap;'>{val_disp}</div></td>")
                 html += "</tr>"
             # ---- 합계 행들: 별도 박스가 아니라 표 맨 아래에 이어서, "미수금액" 칸 밑에 정확히 표기 ----
-            def _total_row(label, amount, bold, bg):
+            def _total_row(label, amount, bold, bg, extra=""):
                 weight = "font-weight:700;" if bold else "font-weight:400;"
                 row = f"<tr style='{weight}background:{bg};'>"
                 row += (f"<td colspan='{n_before_money}' style='padding:0;border-bottom:1px solid #eee;'>"
@@ -1484,13 +1484,17 @@ elif page == "지연현황 보고서":
                 row += (f"<td style='padding:0;border-bottom:1px solid #eee;'>"
                         f"<div style='padding:5px 10px;text-align:right;'>{fmt_money(amount)}</div></td>")
                 row += (f"<td colspan='{n_after_money}' style='padding:0;border-bottom:1px solid #eee;'>"
-                        f"<div style='padding:5px 10px;'></div></td>")
+                        f"<div style='padding:5px 10px;'>{extra}</div></td>")
                 row += "</tr>"
                 return row
 
+            collection_rate = (paid_total / total_claim_amt * 100) if total_claim_amt else 0
+            rate_badge = (f"<span style='background:#E6F1FB;color:#185FA5;border-radius:999px;"
+                          f"padding:2px 12px;font-size:12px;font-weight:700;'>수금률 {collection_rate:.1f}%</span>")
+
             html += _total_row(f"총 미수금액 (받기로 한 돈 전체, 청구건 {len(unique_df)}건 / 행 {len(rep_df)}건 기준)",
                                 total_claim_amt, True, "#fafafa")
-            html += _total_row("└ 입금완료 합계 (실제 들어온 돈)", paid_total, True, "#F4F9F4")
+            html += _total_row("└ 입금완료 합계 (실제 들어온 돈)", paid_total, True, "#F4F9F4", extra=rate_badge)
             html += _total_row("└ 지연 합계 (아직 안 들어온 돈, 예정일 지남)", delay_total, True, "#FCEBEB")
             html += _total_row("└ 입금대기 합계 (아직 예정일 전)", wait_total, True, "#F1EFE8")
             if unconfirmed_total:
